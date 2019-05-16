@@ -30,6 +30,8 @@ derive_more = "0.14"
 c2rust-macros = { version = "0.11.0", path = "../c2rust-macros" }
 flame = { version = "0.2.2", optional = true }
 flamer = { version = "0.3", optional = true }
+rustc_mir = { path = "./dependencies/librustc_mir" }
+# polonius-engine = { path = "./src/polonius-engine" }
 
 [lib]
 name = "c2rust_refactor"
