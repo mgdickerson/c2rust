@@ -54,7 +54,7 @@ extern crate smallvec;
 
 mod diagnostics;
 
-mod borrow_check;
+pub mod borrow_check;
 mod build;
 mod dataflow;
 mod hair;
@@ -69,7 +69,6 @@ pub mod const_eval;
 use rustc::ty::query::Providers;
 
 pub fn provide(providers: &mut Providers<'_>) {
-    borrow_check::provide(providers);
     shim::provide(providers);
     transform::provide(providers);
     monomorphize::partitioning::provide(providers);
