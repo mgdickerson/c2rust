@@ -36,6 +36,7 @@ extern crate rustc_target;
 #[macro_use]
 extern crate smallvec;
 extern crate c2rust_ast_builder;
+extern crate c2rustc_mir;
 extern crate syntax;
 extern crate syntax_ext;
 extern crate syntax_pos;

@@ -60,6 +60,7 @@ transform_modules! {
     items,
     linkage,
     literals,
+    mutability,
     reorganize_definitions,
     ownership,
     retype,
