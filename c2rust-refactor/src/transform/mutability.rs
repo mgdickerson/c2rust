@@ -9,7 +9,7 @@ use syntax::ast::{BindingMode, Crate, Pat, PatKind, Stmt};
 use syntax::ptr::P;
 use syntax::source_map::SpanData;
 
-use crate::ast_manip::fn_edit::mut_visit_fns;
+use crate::ast_manip::fn_edit::{mut_visit_fns, FnKind};
 use crate::ast_manip::FlatMapNodes;
 use crate::command::{CommandState, Registry};
 use crate::driver::Phase;
@@ -29,6 +29,10 @@ impl Transform for RemoveMutability {
         let tcx = cx.ty_ctxt();
 
         mut_visit_fns(krate, |fl| {
+            if fl.kind == FnKind::Foreign {
+                return;
+            }
+
             let def_id = cx.node_def_id(fl.id);
             let mir = tcx.mir_validated(def_id).borrow();
 
@@ -40,6 +44,11 @@ impl Transform for RemoveMutability {
 
             for arg in fl.decl.inputs.iter_mut() {
                 let arg_span = arg.pat.span.data();
+                // We won't find all definitions, like function generated through `#[derive(Copy)]`.
+                if !sorted_user_locals.contains_key(&arg_span) {
+                    continue;
+                }
+
                 let mir_local = sorted_user_locals
                     .get(&arg_span)
                     .expect("Can't match arg node to local.");
