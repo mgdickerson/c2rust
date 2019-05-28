@@ -63,18 +63,20 @@ impl Transform for RemoveMutability {
                 };
             }
 
-            FlatMapNodes::visit(&mut fl.decl, |s: Stmt| {
+            FlatMapNodes::visit(&mut fl.block, |s: Stmt| {
                 let new_stmt = match &s.node {
                     StmtLocal(ast_local) => {
                         match &ast_local.pat.node {
                             PatKind::Ident(BindingMode::ByValue(_), ident, span) => {
+                                let local_span = ast_local.pat.span.data();
+
                                 let mir_local = sorted_user_locals
-                                    .get(&s.span.data())
+                                    .get(&local_span)
                                     .expect("Can't match Ident to local.");
                                 let mir_decl = mir.local_decls.get(*mir_local).unwrap();
 
                                 if mir_decl.mutability == Mutability::Mut
-                                    && used_mut_user_locals.contains(mir_local)
+                                    && !used_mut_user_locals.contains(mir_local)
                                 {
                                     // Is this struct construction really idiomatic? But the borrow checker accepts it at least...
                                     let new_pat = P(Pat {
