@@ -4,6 +4,8 @@ use std::collections::BTreeMap;
 use std::iter::FromIterator;
 use std::mem;
 use std::rc::Rc;
+use std::collections::hash_set::HashSet;
+// use std::collections::hash_map::HashMap;
 
 use rustc::hir;
 use rustc::hir::def_id::DefId;
@@ -19,6 +21,7 @@ use rustc::mir::{
 use rustc::mir::{Field, Projection, ProjectionElem, Rvalue, Statement, StatementKind};
 use rustc::mir::{Terminator, TerminatorKind};
 use rustc::ty::{self, TyCtxt};
+use rustc::ty::TyKind;
 use rustc_data_structures::bit_set::BitSet;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_data_structures::graph::dominators::Dominators;
@@ -59,6 +62,7 @@ crate mod place_ext;
 crate mod places_conflict;
 mod prefixes;
 mod used_muts;
+// mod used_mut_refs;
 
 pub(crate) mod nll;
 
@@ -125,6 +129,7 @@ fn do_mir_borrowck<'a, 'gcx, 'tcx>(
     input_mir: &Mir<'gcx>,
     def_id: DefId,
 ) -> BorrowCheckResult<'gcx> {
+    // println!("\n\ndo_mir_borrowck(def_id = {:?}", def_id);
     debug!("do_mir_borrowck(def_id = {:?})", def_id);
 
     let tcx = infcx.tcx;
@@ -247,8 +252,11 @@ fn do_mir_borrowck<'a, 'gcx, 'tcx>(
         nonlexical_regioncx: regioncx,
         used_mut: Default::default(),
         used_mut_upvars: SmallVec::new(),
+        used_mut_refs: Default::default(),
+        maybe_used_mut_refs: Default::default(),
         borrow_set,
         dominators,
+        naa: NaiveAliasAnalysis::default(),
     };
 
     let mut state = Flows::new(
@@ -256,11 +264,12 @@ fn do_mir_borrowck<'a, 'gcx, 'tcx>(
         flow_uninits,
         flow_ever_inits,
         polonius_output,
-    );
+    ); 
 
     if let Some(errors) = move_errors {
         mbcx.report_move_errors(errors);
     }
+    
     mbcx.analyze_results(&mut state); // entry point for DataflowResultsConsumer
 
     // Convert any reservation warnings into lints.
@@ -302,8 +311,89 @@ fn do_mir_borrowck<'a, 'gcx, 'tcx>(
         .filter(|local| !mbcx.used_mut.contains(local))
         .collect();
     mbcx.gather_used_muts(temporary_used_locals, unused_mut_locals);
+    
+    // Goes through all used_mut_refs and grabs their alias sets.
+    // Alias sets are then added to the used_mut_refs to ensure 
+    // types that need to remain mutable do.
+    let used_mut_refs = mbcx.used_mut_refs.clone();
+    for key in used_mut_refs.iter() {
+        if let Some(alias_set) = mbcx.naa.get_alias_set(&key) {
+            let local_set = alias_set.clone();
+
+            for local in local_set.iter() {
+                mbcx.used_mut_refs.insert(*local);
+            }
+        }
+    }
+    
+    // This prints out the currently assumed set of what can be 
+    // changed from mutable references to just normal references 
+    // (or mutable raw pointers to const raw pointers).
+
+    let used_mut_refs = mbcx.used_mut_refs.clone();
+    let mut local_ptr_set : FxHashSet<Local> = mbcx.mir.vars_iter()
+        .filter_map(|local| {
+            let local_decl = mbcx.mir.local_decls[local].clone();
+            let decl_ty = local_decl.ty.sty.clone();
+            match decl_ty {
+                TyKind::Ref(_, _, mutability) => {
+                    if rustc::hir::Mutability::MutMutable == mutability {
+                        return Some(local)
+                    } else {
+                        return None
+                    }
+                }
+                TyKind::RawPtr(_ty_and_mut) => {
+                    // For now just ignore
+                    // TODO : Include these types
+                    return None
+                }
+                _ => {
+                    return None
+                }
+            }
+        })
+        .collect();
+    mbcx.mir.args_iter().for_each(|arg| {
+        let local_decl = mbcx.mir.local_decls[arg].clone();
+        let decl_ty = local_decl.ty.sty.clone();
+            match decl_ty {
+                TyKind::Ref(_, _, mutability) => {
+                    if rustc::hir::Mutability::MutMutable == mutability {
+                        local_ptr_set.insert(arg);
+                    }
+                }
+                TyKind::RawPtr(_ty_and_mut) => {
+                    // For now just ignore
+                    // TODO : Include these types
+                }
+                _ => {}
+            }
+    });
+
+    for local in local_ptr_set.iter().filter(|local| !used_mut_refs.contains(local)) {
+        if let ClearCrossCrate::Set(ref vsi) = mbcx.mir().source_scope_local_data {
+            let local_decl = &mbcx.mir.local_decls[*local];
+            let span = local_decl.source_info.span;
+            let mut_span = tcx.sess.source_map().span_until_non_whitespace(span);
+            tcx.struct_span_lint_hir(
+                UNUSED_MUT, 
+                vsi[local_decl.source_info.scope].lint_root, 
+                span, 
+                "pointer type does not need to be mutable"
+                )
+                    .span_suggestion_short(
+                        mut_span,
+                        "remove `mut` from pointer type",
+                        String::new(),
+                        Applicability::MachineApplicable,
+                    )
+                    .emit();
+        }
+    }
 
     debug!("mbcx.used_mut: {:?}", mbcx.used_mut);
+    // println!("mbcx.used_mut_refs: {:?}", mbcx.used_mut_refs);
     let used_mut = mbcx.used_mut;
     for local in mbcx.mir.mut_vars_and_args_iter().filter(|local| !used_mut.contains(local)) {
         if let ClearCrossCrate::Set(ref vsi) = mbcx.mir.source_scope_local_data {
@@ -475,6 +565,17 @@ pub struct MirBorrowckCtxt<'cx, 'gcx: 'tcx, 'tcx: 'cx> {
     /// If the function we're checking is a closure, then we'll need to report back the list of
     /// mutable upvars that have been used. This field keeps track of them.
     used_mut_upvars: SmallVec<[Field; 8]>,
+
+    /// This field keeps track of all the local variables that are mutable references and 
+    /// are mutated within the scope of the given function.
+    used_mut_refs: FxHashSet<Local>,
+
+    /// This field keeps track of all local variables that might be used mutably, 
+    /// such as in the case of function calls with '&mut' signatures. This will 
+    /// collect any mutable references that cant be immediately determined to be 
+    /// in use and will be decided upon later when more information is present.
+    maybe_used_mut_refs: FxHashSet<Local>,
+
     /// Non-lexical region inference context, if NLL is enabled. This
     /// contains the results from region inference and lets us e.g.
     /// find out which CFG points are contained in each borrow region.
@@ -485,6 +586,15 @@ pub struct MirBorrowckCtxt<'cx, 'gcx: 'tcx, 'tcx: 'cx> {
 
     /// Dominators for MIR
     dominators: Dominators<BasicBlock>,
+
+    // Test Addition
+    //test: i32,    // test successful, only one place needs changing
+    // TODO : Add structure for tracking mutable pointers
+
+    /// NaiveAliasAnalysis tracks very simple aliasing of values to ensure 
+    /// that aliased mutable references that are assigned to will add the 
+    /// values they alias to the used_mut_refs set.
+    naa: NaiveAliasAnalysis,
 }
 
 // Check that:
@@ -513,9 +623,13 @@ impl<'cx, 'gcx, 'tcx> DataflowResultsConsumer<'cx, 'tcx> for MirBorrowckCtxt<'cx
             "MirBorrowckCtxt::process_statement({:?}, {:?}): {}",
             location, stmt, flow_state
         );
+
         let span = stmt.source_info.span;
 
         self.check_activations(location, span, flow_state);
+
+        // Separated call to check mutability of reference and raw pointer types.
+        self.check_statement_entry(&location, &stmt);
 
         match stmt.kind {
             StatementKind::Assign(ref lhs, ref rhs) => {
@@ -556,6 +670,7 @@ impl<'cx, 'gcx, 'tcx> DataflowResultsConsumer<'cx, 'tcx> for MirBorrowckCtxt<'cx
                 ref place,
                 variant_index: _,
             } => {
+                println!("Stmt: {:?}", stmt);
                 self.mutate_place(
                     ContextKind::SetDiscrim.new(location),
                     (place, span),
@@ -1164,7 +1279,7 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
                 return;
             }
         }
-
+        
         // Otherwise, use the normal access permission rules.
         self.access_place(
             context,
@@ -2187,6 +2302,173 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
     }
 }
 
+impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
+    /// This function serves to check for any mutable references 
+    /// or raw pointers within each statement, tracks simple forms 
+    /// of aliasing, and builds the used_mut_refs and maybe_used_mut_refs
+    /// sets. 
+    fn check_statement_entry(
+        &mut self,
+        _location: &Location,
+        stmt: &Statement<'tcx>,
+    ) {
+        match stmt.kind {
+            StatementKind::Assign(ref lhs, ref rhs) => {
+                // println!("Stmt: {:?}", stmt);
+
+                match lhs {
+                    // Aliasing occurs when lhs is a Base (e.g. 'let x : &mut i32 = y; // x is a base place')
+                    Place::Base(lhs_base) => {
+                        // println!("Base -> lhs: {:?}", lhs);
+
+                        match lhs_base {
+                            // Value is local to the function
+                            PlaceBase::Local(lhs_local) => {
+                                // Check if LHS is a reference type, if it is break it down in to further possibilities
+                                if let rustc::ty::TyKind::Ref(_, _ty, mutable) = self.mir.local_decls[*lhs_local].ty.sty {
+
+                                    // println!("Stmt: {:?}", stmt);
+                                    if rustc::hir::Mutability::MutMutable == mutable {
+                                        match *rhs.clone() {
+                                            rustc::mir::Rvalue::Ref(_, _borrow_kind, _place) => {},
+                                            rustc::mir::Rvalue::Use(op) => {
+                                                match op {
+                                                    rustc::mir::Operand::Copy(_place) => {},
+                                                    rustc::mir::Operand::Move(place) => {
+                                                        // I believe that this constitutes an assignment where lhs aliases rhs.
+                                                        if let Some(rhs_local) = place.base_local() {
+                                                            self.naa.add_alias(&lhs_local, &rhs_local);
+                                                        }
+                                                    },
+                                                    rustc::mir::Operand::Constant(_con) => {},
+                                                }
+                                            },
+                                            _ => {
+                                                // Currently all types not checked for will constitute 
+                                                // some form of legal assignment and should be added
+                                                // to the set of used mutable references.
+                                                self.used_mut_refs.insert(*lhs_local);
+                                            },
+                                        }
+                                    }
+                                }
+                            },
+
+                            // TODO : Still need to look more in to this
+                            rustc::mir::PlaceBase::Static(_stat) => {
+                                // Not sure what to do here yet, lets just check if it ever happens.
+                                // println!("Static Case Reached: {:?}", lhs);
+                            },
+                        }
+                    },
+
+                    // So far, all assignments being tracked are derefs of projections.
+                    Place::Projection(proj) => {
+                        // println!("Projection -> lhs: {:?}", lhs);
+
+                        match proj.elem {
+                            rustc::mir::ProjectionElem::Deref => {
+                                if let Place::Base(PlaceBase::Local(local)) = proj.base {
+                                    // This basically covers super basic cases of aliasing, should probably make recursive call function of it.
+                                    self.used_mut_refs.insert(local);
+                                }
+                            },
+                            _ => {
+                                // These other types will likely be important, thus place holder.
+                                // TODO : Other types important?
+                            },
+                        }
+                    },
+                }
+            }
+            _ => {},
+
+            // Commenting out so that warnings are quiet.
+
+            // StatementKind::FakeRead(_, ref place) => {
+            //     // Read for match doesn't access any memory and is used to
+            //     // assert that a place is safe and live. So we don't have to
+            //     // do any checks here.
+            //     //
+            //     // FIXME: Remove check that the place is initialized. This is
+            //     // needed for now because matches don't have never patterns yet.
+            //     // So this is the only place we prevent
+            //     //      let x: !;
+            //     //      match x {};
+            //     // from compiling.
+            //     // self.check_if_path_or_subpath_is_moved(
+            //     //     ContextKind::FakeRead.new(location),
+            //     //     InitializationRequiringAction::Use,
+            //     //     (place, span),
+            //     //     flow_state,
+            //     // );
+            // }
+            // StatementKind::SetDiscriminant {
+            //     ref place,
+            //     variant_index: _,
+            // } => {
+            //     // println!("Stmt: {:?}", stmt);
+            //     // self.mutate_place(
+            //     //     ContextKind::SetDiscrim.new(location),
+            //     //     (place, span),
+            //     //     Shallow(None),
+            //     //     JustWrite,
+            //     //     flow_state,
+            //     // );
+            // }
+            // StatementKind::InlineAsm(ref asm) => {
+            //     // let context = ContextKind::InlineAsm.new(location);
+            //     // for (o, output) in asm.asm.outputs.iter().zip(asm.outputs.iter()) {
+            //     //     if o.is_indirect {
+            //     //         // FIXME(eddyb) indirect inline asm outputs should
+            //     //         // be encoded through MIR place derefs instead.
+            //     //         self.access_place(
+            //     //             context,
+            //     //             (output, o.span),
+            //     //             (Deep, Read(ReadKind::Copy)),
+            //     //             LocalMutationIsAllowed::No,
+            //     //             flow_state,
+            //     //         );
+            //     //         self.check_if_path_or_subpath_is_moved(
+            //     //             context,
+            //     //             InitializationRequiringAction::Use,
+            //     //             (output, o.span),
+            //     //             flow_state,
+            //     //         );
+            //     //     } else {
+            //     //         self.mutate_place(
+            //     //             context,
+            //     //             (output, o.span),
+            //     //             if o.is_rw { Deep } else { Shallow(None) },
+            //     //             if o.is_rw { WriteAndRead } else { JustWrite },
+            //     //             flow_state,
+            //     //         );
+            //     //     }
+            //     // }
+            //     // for (_, input) in asm.inputs.iter() {
+            //     //     self.consume_operand(context, (input, span), flow_state);
+            //     // }
+            // }
+            // StatementKind::Nop
+            // | StatementKind::AscribeUserType(..)
+            // | StatementKind::Retag { .. }
+            // | StatementKind::StorageLive(..) => {
+            //     // `Nop`, `AscribeUserType`, `Retag`, and `StorageLive` are irrelevant
+            //     // to borrow check.
+            // }
+            // StatementKind::StorageDead(local) => {
+            //     // self.access_place(
+            //     //     ContextKind::StorageDead.new(location),
+            //     //     (&Place::Base(PlaceBase::Local(local)), span),
+            //     //     (Shallow(None), Write(WriteKind::StorageDeadOrDrop)),
+            //     //     LocalMutationIsAllowed::Yes,
+            //     //     flow_state,
+            //     // );
+            // }
+        }
+    }
+}
+
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 enum NoMovePathFound {
     ReachedStatic,
@@ -2241,5 +2523,61 @@ impl ContextKind {
             kind: self,
             loc,
         }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+struct NaiveAliasAnalysis {
+    alias_sets: FxHashMap<Local, FxHashSet<Local>>,
+    current_alias_map : FxHashMap<Local, Local>,
+}
+
+impl NaiveAliasAnalysis {
+    /// Adds alias values to the NAA structure. 
+    /// Checks first to see if 'old_alias' value 
+    /// has a key in current_alias_map, otherwise 
+    /// this is a base value that does not alias 
+    /// any other value: 
+    /// ```rust
+    /// let x : i32 = 0;
+    /// let y = x;  // x is base value, y is alias of x.
+    /// ``` 
+    fn add_alias(
+        &mut self,
+        new_alias: &Local,
+        local: &Local,
+    ) {
+        // First check if local is already an alias
+        if let Some(base_local) = self.current_alias_map.get(local) {
+            // local is an alias for base_local
+            if let Some(alias_set) = self.alias_sets.get_mut(base_local) {
+                // add new alias to alias set.
+                alias_set.insert(new_alias.clone());
+            }
+
+            // Helps avoid borrow problems.
+            let local_base = *base_local;
+            self.current_alias_map.insert(new_alias.clone(), local_base);
+        } else {
+            // local is not currently an alias for any value,
+            // create alias_set for it, then add alias and base_local 
+            // to current_alias_map.
+            let mut alias_set = HashSet::default();
+            alias_set.insert(*local);
+            alias_set.insert(*new_alias);
+
+            self.alias_sets.insert(*local, alias_set);
+            self.current_alias_map.insert(*new_alias, *local);
+        }
+    }
+
+    fn get_alias_set(
+        &self, 
+        key: &Local,
+    ) -> Option<&FxHashSet<Local>> {
+        if let Some(alias_key) = self.current_alias_map.get(key) {
+            return self.alias_sets.get(alias_key)
+        }
+        None
     }
 }
