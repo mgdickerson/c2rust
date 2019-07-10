@@ -11,6 +11,7 @@ use std::collections::hash_set::HashSet;
 use rustc::hir;
 use rustc::hir::def_id::DefId;
 use rustc::hir::Node;
+use rustc::hir::Mutability::{MutMutable};
 use rustc::infer::InferCtxt;
 use rustc::lint::builtin::MUTABLE_BORROW_RESERVATION_CONFLICT;
 use rustc::lint::builtin::UNUSED_MUT;
@@ -110,7 +111,7 @@ fn do_mir_borrowck<'a, 'tcx>(
     input_body: &Body<'tcx>,
     def_id: DefId,
 ) -> BorrowCheckResult<'tcx> {
-    // println!("\n\ndo_mir_borrowck(def_id = {:?}", def_id);
+    println!("\n\ndo_mir_borrowck(def_id = {:?}", def_id);
     debug!("do_mir_borrowck(def_id = {:?})", def_id);
 
     let tcx = infcx.tcx;
@@ -351,21 +352,19 @@ fn do_mir_borrowck<'a, 'tcx>(
             let decl_ty = local_decl.ty.sty.clone();
             match decl_ty {
                 TyKind::Ref(_, _, mutability) => {
-                    if rustc::hir::Mutability::MutMutable == mutability {
+                    if MutMutable == mutability {
                         return Some(local)
-                    } else {
-                        return None
                     }
                 }
-                TyKind::RawPtr(_ty_and_mut) => {
-                    // For now just ignore
-                    // TODO : Include these types
-                    return None
+                TyKind::RawPtr(data) => {
+                    if MutMutable == data.mutbl {
+                        return Some(local)
+                    }
                 }
-                _ => {
-                    return None
-                }
+                _ => {}
             }
+
+            None
         })
         .collect();
     mbcx.body.args_iter().for_each(|arg| {
@@ -373,13 +372,14 @@ fn do_mir_borrowck<'a, 'tcx>(
         let decl_ty = local_decl.ty.sty.clone();
             match decl_ty {
                 TyKind::Ref(_, _, mutability) => {
-                    if rustc::hir::Mutability::MutMutable == mutability {
+                    if MutMutable == mutability {
                         local_ptr_set.insert(arg);
                     }
                 }
-                TyKind::RawPtr(_ty_and_mut) => {
-                    // For now just ignore
-                    // TODO : Include these types
+                TyKind::RawPtr(data) => {
+                    if MutMutable == data.mutbl {
+                        local_ptr_set.insert(arg);
+                    }
                 }
                 _ => {}
             }
@@ -2411,37 +2411,84 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
                             // Value is local to the function
                             PlaceBase::Local(lhs_local) => {
                                 // Check if LHS is a reference type, if it is break it down in to further possibilities
-                                if let rustc::ty::TyKind::Ref(_, _ty, mutable) = self.body.local_decls[*lhs_local].ty.sty {
+                                match self.body.local_decls[*lhs_local].ty.sty {
+                                    TyKind::Ref(_, _ty, mutable) => {
+                                        // println!("Stmt: {:?}", stmt);
+                                        if MutMutable == mutable {
+                                            match *rhs.clone() {
+                                                Rvalue::Ref(_, _borrow_kind, _place) => {},
+                                                Rvalue::Use(op) => {
+                                                    match op {
+                                                        Operand::Copy(_place) => {
 
-                                    // println!("Stmt: {:?}", stmt);
-                                    if rustc::hir::Mutability::MutMutable == mutable {
-                                        match *rhs.clone() {
-                                            rustc::mir::Rvalue::Ref(_, _borrow_kind, _place) => {},
-                                            rustc::mir::Rvalue::Use(op) => {
-                                                match op {
-                                                    rustc::mir::Operand::Copy(_place) => {},
-                                                    rustc::mir::Operand::Move(place) => {
-                                                        // I believe that this constitutes an assignment where lhs aliases rhs.
-                                                        if let Some(rhs_local) = place.base_local() {
-                                                            self.naa.add_alias(&lhs_local, &rhs_local);
-                                                        }
-                                                    },
-                                                    rustc::mir::Operand::Constant(_con) => {},
-                                                }
-                                            },
-                                            _ => {
-                                                // Currently all types not checked for will constitute
-                                                // some form of legal assignment and should be added
-                                                // to the set of used mutable references.
-                                                self.used_mut_refs.insert(*lhs_local);
-                                            },
+                                                        },
+                                                        Operand::Move(place) => {
+                                                            // I believe that this constitutes an assignment where lhs aliases rhs.
+                                                            if let Some(rhs_local) = place.base_local() {
+                                                                self.naa.add_alias(&lhs_local, &rhs_local);
+                                                            }
+                                                        },
+                                                        Operand::Constant(_con) => {
+                                                            // Not sure this case can be reached. If it is,
+                                                            // seems like it would be an error...
+                                                        },
+                                                    }
+                                                },
+                                                _ => {
+                                                    // Currently all types not checked for will constitute
+                                                    // some form of legal assignment and should be added
+                                                    // to the set of used mutable references.
+                                                    self.used_mut_refs.insert(*lhs_local);
+                                                },
+                                            }
                                         }
-                                    }
+                                    },
+
+                                    TyKind::RawPtr(data) => {
+                                        // println!("Stmt: {:?}", stmt);
+                                        if data.mutbl == MutMutable {
+                                            match *rhs.clone() {
+                                                Rvalue::Ref(_, borrow_kind, place) => {
+                                                    println!("Rhs.Ref(_, borrow_kind: {:?}, place: {:?}", borrow_kind, place);
+                                                },
+                                                Rvalue::Use(op) => {
+                                                    match op {
+                                                        Operand::Copy(_place) => {},
+                                                        Operand::Move(place) => {
+                                                            if let Some(rhs_local) = place.base_local() {
+                                                                self.naa.add_alias(&lhs_local, &rhs_local);
+                                                            }
+                                                        },
+                                                        Operand::Constant(_con) => {},
+                                                    }
+                                                },
+                                                Rvalue::Discriminant(place) => {
+                                                    println!("Rhs.Discriminant(place: {:?}", place);
+                                                }
+                                                Rvalue::Cast(_cast_kind, operand, _ty) => {
+                                                    // println!("Rhs.Cast(cast_kind: {:?}, operand: {:?}, ty: {:?})", cast_kind, operand, ty);
+                                                    // Assuming this cast is correct (which other parts of the compiler should check for)
+                                                    // we can assume that this is likely an aliasing assignment.
+                                                    match operand {
+                                                        Operand::Copy(place) | Operand::Move(place) => {
+                                                            if let Some(rhs_local) = place.base_local() {
+                                                                self.naa.add_alias(&lhs_local, &rhs_local);
+                                                            }
+                                                        },
+                                                        Operand::Constant(_con) => {},
+                                                    }
+                                                },
+                                                _ => {},
+                                            }
+                                        }
+                                    },
+
+                                    _ => { /* Currently the remaining types are passed over */ },
                                 }
                             },
 
                             // TODO : Still need to look more in to this
-                            rustc::mir::PlaceBase::Static(_stat) => {
+                            PlaceBase::Static(_stat) => {
                                 // Not sure what to do here yet, lets just check if it ever happens.
                                 // println!("Static Case Reached: {:?}", lhs);
                             },
@@ -2450,10 +2497,11 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
 
                     // So far, all assignments being tracked are derefs of projections.
                     Place::Projection(proj) => {
+                        println!("Stmt: {:?}", stmt);
                         // println!("Projection -> lhs: {:?}", lhs);
 
                         match proj.elem {
-                            rustc::mir::ProjectionElem::Deref => {
+                            ProjectionElem::Deref => {
                                 if let Place::Base(PlaceBase::Local(local)) = proj.base {
                                     // This basically covers super basic cases of aliasing, should probably make recursive call function of it.
                                     self.used_mut_refs.insert(local);
