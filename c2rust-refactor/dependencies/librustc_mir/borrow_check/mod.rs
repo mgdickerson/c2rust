@@ -111,7 +111,7 @@ fn do_mir_borrowck<'a, 'tcx>(
     input_body: &Body<'tcx>,
     def_id: DefId,
 ) -> BorrowCheckResult<'tcx> {
-    println!("\n\ndo_mir_borrowck(def_id = {:?}", def_id);
+    // println!("\n\ndo_mir_borrowck(def_id = {:?}", def_id);
     debug!("do_mir_borrowck(def_id = {:?})", def_id);
 
     let tcx = infcx.tcx;
@@ -266,7 +266,7 @@ fn do_mir_borrowck<'a, 'tcx>(
         used_mut: Default::default(),
         used_mut_upvars: SmallVec::new(),
         used_mut_refs: Default::default(),
-        maybe_used_mut_refs: Default::default(),
+        may_mut_refs: Default::default(),
         borrow_set,
         dominators,
         upvars,
@@ -330,6 +330,14 @@ fn do_mir_borrowck<'a, 'tcx>(
     // Goes through all used_mut_refs and grabs their alias sets.
     // Alias sets are then added to the used_mut_refs to ensure
     // types that need to remain mutable do.
+    let may_mut_refs = mbcx.may_mut_refs.clone();
+    may_mut_refs.iter().for_each(|&local| {
+        // These are all locals that have been called by a function and thus
+        // may be used mutably. Thus we initially add them to the used set
+        // and make a separate warning for these values.
+        mbcx.used_mut_refs.insert(local);
+    });
+
     let used_mut_refs = mbcx.used_mut_refs.clone();
     for key in used_mut_refs.iter() {
         if let Some(alias_set) = mbcx.naa.get_alias_set(&key) {
@@ -385,7 +393,10 @@ fn do_mir_borrowck<'a, 'tcx>(
             }
     });
 
+    // println!("NAA: {:?}", mbcx.naa);
+
     for local in local_ptr_set.iter().filter(|local| !used_mut_refs.contains(local)) {
+        println!("unused local: {:?}", local);
         if let ClearCrossCrate::Set(ref vsi) = mbcx.body().source_scope_local_data {
             let local_decl = &mbcx.body.local_decls[*local];
             let span = local_decl.source_info.span;
@@ -405,6 +416,8 @@ fn do_mir_borrowck<'a, 'tcx>(
                     .emit();
         }
     }
+
+    // TODO : Separate warning generation for potentially used mutable ptrs.
 
     debug!("mbcx.used_mut: {:?}", mbcx.used_mut);
     // println!("mbcx.used_mut_refs: {:?}", mbcx.used_mut_refs);
@@ -589,7 +602,7 @@ pub struct MirBorrowckCtxt<'cx, 'tcx> {
     /// such as in the case of function calls with '&mut' signatures. This will
     /// collect any mutable references that cant be immediately determined to be
     /// in use and will be decided upon later when more information is present.
-    maybe_used_mut_refs: FxHashSet<Local>,
+    may_mut_refs: FxHashSet<Local>,
 
     /// Non-lexical region inference context, if NLL is enabled. This
     /// contains the results from region inference and lets us e.g.
@@ -761,6 +774,7 @@ impl<'cx, 'tcx> DataflowResultsConsumer<'cx, 'tcx> for MirBorrowckCtxt<'cx, 'tcx
         let span = term.source_info.span;
 
         self.check_activations(location, span, flow_state);
+        self.check_terminator_entry(&location, &term);
 
         match term.kind {
             TerminatorKind::SwitchInt {
@@ -2400,27 +2414,22 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
     ) {
         match stmt.kind {
             StatementKind::Assign(ref lhs, ref rhs) => {
-                // println!("Stmt: {:?}", stmt);
-
                 match lhs {
                     // Aliasing occurs when lhs is a Base (e.g. 'let x : &mut i32 = y; // x is a base place')
                     Place::Base(lhs_base) => {
-                        // println!("Base -> lhs: {:?}", lhs);
-
                         match lhs_base {
                             // Value is local to the function
                             PlaceBase::Local(lhs_local) => {
                                 // Check if LHS is a reference type, if it is break it down in to further possibilities
                                 match self.body.local_decls[*lhs_local].ty.sty {
                                     TyKind::Ref(_, _ty, mutable) => {
-                                        // println!("Stmt: {:?}", stmt);
                                         if MutMutable == mutable {
                                             match *rhs.clone() {
                                                 Rvalue::Ref(_, _borrow_kind, _place) => {},
                                                 Rvalue::Use(op) => {
                                                     match op {
                                                         Operand::Copy(_place) => {
-
+                                                            println!("Assignment::Copy: {:?}", stmt);
                                                         },
                                                         Operand::Move(place) => {
                                                             // I believe that this constitutes an assignment where lhs aliases rhs.
@@ -2429,8 +2438,7 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
                                                             }
                                                         },
                                                         Operand::Constant(_con) => {
-                                                            // Not sure this case can be reached. If it is,
-                                                            // seems like it would be an error...
+                                                            println!("Constant: {:?}", stmt);
                                                         },
                                                     }
                                                 },
@@ -2445,7 +2453,6 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
                                     },
 
                                     TyKind::RawPtr(data) => {
-                                        // println!("Stmt: {:?}", stmt);
                                         if data.mutbl == MutMutable {
                                             match *rhs.clone() {
                                                 Rvalue::Ref(_, borrow_kind, place) => {
@@ -2453,7 +2460,12 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
                                                 },
                                                 Rvalue::Use(op) => {
                                                     match op {
-                                                        Operand::Copy(_place) => {},
+                                                        Operand::Copy(place) => {
+                                                            // println!("Lhs.RawPtr: {:?}", stmt);
+                                                            if let Some(rhs_local) = place.base_local() {
+                                                                self.naa.add_alias(&lhs_local, &rhs_local);
+                                                            }
+                                                        },
                                                         Operand::Move(place) => {
                                                             if let Some(rhs_local) = place.base_local() {
                                                                 self.naa.add_alias(&lhs_local, &rhs_local);
@@ -2478,7 +2490,10 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
                                                         Operand::Constant(_con) => {},
                                                     }
                                                 },
-                                                _ => {},
+                                                _ => {
+                                                    // Not really sure what other types would go here.
+                                                    println!("Other RHS for RawPtr: {:?}", stmt);
+                                                },
                                             }
                                         }
                                     },
@@ -2487,19 +2502,15 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
                                 }
                             },
 
-                            // TODO : Still need to look more in to this
                             PlaceBase::Static(_stat) => {
                                 // Not sure what to do here yet, lets just check if it ever happens.
-                                // println!("Static Case Reached: {:?}", lhs);
+                                println!("Static Case Reached: {:?}", lhs);
                             },
                         }
                     },
 
                     // So far, all assignments being tracked are derefs of projections.
                     Place::Projection(proj) => {
-                        println!("Stmt: {:?}", stmt);
-                        // println!("Projection -> lhs: {:?}", lhs);
-
                         match proj.elem {
                             ProjectionElem::Deref => {
                                 if let Place::Base(PlaceBase::Local(local)) = proj.base {
@@ -2515,28 +2526,12 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
                     },
                 }
             }
-            _ => {},
+            StatementKind::InlineAsm(ref _asm) => {
+                println!("InlineAsm: {:?}", stmt);
+            }
+            _ => { /* Remaining types do not apply */ },
 
             // Commenting out so that warnings are quiet.
-
-            // StatementKind::FakeRead(_, ref place) => {
-            //     // Read for match doesn't access any memory and is used to
-            //     // assert that a place is safe and live. So we don't have to
-            //     // do any checks here.
-            //     //
-            //     // FIXME: Remove check that the place is initialized. This is
-            //     // needed for now because matches don't have never patterns yet.
-            //     // So this is the only place we prevent
-            //     //      let x: !;
-            //     //      match x {};
-            //     // from compiling.
-            //     // self.check_if_path_or_subpath_is_moved(
-            //     //     ContextKind::FakeRead.new(location),
-            //     //     InitializationRequiringAction::Use,
-            //     //     (place, span),
-            //     //     flow_state,
-            //     // );
-            // }
             // StatementKind::SetDiscriminant {
             //     ref place,
             //     variant_index: _,
@@ -2550,55 +2545,165 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
             //     //     flow_state,
             //     // );
             // }
-            // StatementKind::InlineAsm(ref asm) => {
-            //     // let context = ContextKind::InlineAsm.new(location);
-            //     // for (o, output) in asm.asm.outputs.iter().zip(asm.outputs.iter()) {
-            //     //     if o.is_indirect {
-            //     //         // FIXME(eddyb) indirect inline asm outputs should
-            //     //         // be encoded through MIR place derefs instead.
-            //     //         self.access_place(
-            //     //             context,
-            //     //             (output, o.span),
-            //     //             (Deep, Read(ReadKind::Copy)),
-            //     //             LocalMutationIsAllowed::No,
-            //     //             flow_state,
-            //     //         );
-            //     //         self.check_if_path_or_subpath_is_moved(
-            //     //             context,
-            //     //             InitializationRequiringAction::Use,
-            //     //             (output, o.span),
-            //     //             flow_state,
-            //     //         );
-            //     //     } else {
-            //     //         self.mutate_place(
-            //     //             context,
-            //     //             (output, o.span),
-            //     //             if o.is_rw { Deep } else { Shallow(None) },
-            //     //             if o.is_rw { WriteAndRead } else { JustWrite },
-            //     //             flow_state,
-            //     //         );
-            //     //     }
-            //     // }
-            //     // for (_, input) in asm.inputs.iter() {
-            //     //     self.consume_operand(context, (input, span), flow_state);
-            //     // }
-            // }
-            // StatementKind::Nop
-            // | StatementKind::AscribeUserType(..)
-            // | StatementKind::Retag { .. }
-            // | StatementKind::StorageLive(..) => {
-            //     // `Nop`, `AscribeUserType`, `Retag`, and `StorageLive` are irrelevant
-            //     // to borrow check.
-            // }
-            // StatementKind::StorageDead(local) => {
-            //     // self.access_place(
-            //     //     ContextKind::StorageDead.new(location),
-            //     //     (&Place::Base(PlaceBase::Local(local)), span),
-            //     //     (Shallow(None), Write(WriteKind::StorageDeadOrDrop)),
-            //     //     LocalMutationIsAllowed::Yes,
-            //     //     flow_state,
-            //     // );
-            // }
+        }
+    }
+
+    fn check_terminator_entry(
+        &mut self,
+        location: &Location,
+        term: &Terminator<'tcx>,
+    ) {
+        // println!("MirBorrockCtxt::check_terminator({:?}, {:?})", location, term);
+        debug!(
+            "MirBorrowckCtxt::process_terminator({:?}, {:?})",
+            location, term
+        );
+
+        match term.kind {
+            TerminatorKind::Call {
+                func: _,
+                ref args,
+                destination: _,
+                cleanup: _,
+                from_hir_call: _,
+            } => {
+                // This area is where things get interesting for use cases.
+                // A function call leads to a situation where one of our locals
+                // MAY be used within the context of the function call, but
+                // within the scope of each function there is no information regarding other
+                // functions (that I have found yet anyway) and so all locals that may
+                // possibly be mutated will be added to the maybe_used_mut_ref list.
+                for arg in args {
+                    // println!("normally visible arg: {:?}", arg);
+
+                    match arg {
+                        Operand::Copy(_place) => {
+                            println!("TerminatorKind::Call(Copy): {:?}", arg);
+                        },
+                        Operand::Move(place) => {
+                            if let Some(local) = place.base_local() {
+                                let local_decl = self.mir.local_decls[local].clone();
+                                let decl_ty = local_decl.ty.sty.clone();
+
+                                match decl_ty {
+                                    TyKind::Ref(_, _ty, mutability) => {
+                                        if mutability == MutMutable {
+                                            self.may_mut_refs.insert(local);
+                                        }
+                                    },
+                                    TyKind::RawPtr(data) => {
+                                        if data.mutbl == MutMutable {
+                                            self.may_mut_refs.insert(local);
+                                        }
+                                    },
+                                    _ => {
+                                        // Only interested in the Ref and RawPtr arguments.
+                                    },
+                                }
+                            }
+                        },
+                        Operand::Constant(_constant) => {
+                            // Constants should not indicate an area where any tracking needs to be done.
+                            println!("TerminatorKind::Call(Constant): {:?}", arg);
+                        },
+                    }
+                }
+
+                // TODO : If we return a mutable pointer from a function, how do we track that? Assume that it must be mutable?
+            }
+            TerminatorKind::SwitchInt {
+                discr: _,
+                switch_ty: _,
+                values: _,
+                targets: _,
+            } => {
+                // println!("TerminatorKind::SwitchInt: {:?}", term);
+            }
+            TerminatorKind::Yield {
+                value: _,
+                resume: _,
+                drop: _,
+            } => {
+                // Possibly interesting.
+                println!("TerminatorKind::Yield: {:?}", term);
+            }
+
+            _ => { /* Pass over remaining types */ }
+            /*
+            TerminatorKind::Drop {
+                location: ref drop_place,
+                target: _,
+                unwind: _,
+            } => {
+                // println!("TermintorKind::Drop: {:?}", term);
+
+                /*
+                let gcx = self.infcx.tcx.global_tcx();
+
+                // Compute the type with accurate region information.
+                let drop_place_ty = drop_place.ty(self.mir, self.infcx.tcx);
+
+                // Erase the regions.
+                let drop_place_ty = self.infcx.tcx.erase_regions(&drop_place_ty).ty;
+
+                // "Lift" into the gcx -- once regions are erased, this type should be in the
+                // global arenas; this "lift" operation basically just asserts that is true, but
+                // that is useful later.
+                let drop_place_ty = gcx.lift(&drop_place_ty).unwrap();
+
+                debug!("visit_terminator_drop \
+                        loc: {:?} term: {:?} drop_place: {:?} drop_place_ty: {:?} span: {:?}",
+                       loc, term, drop_place, drop_place_ty, span);
+
+                self.access_place(
+                    ContextKind::Drop.new(loc),
+                    (drop_place, span),
+                    (AccessDepth::Drop, Write(WriteKind::StorageDeadOrDrop)),
+                    LocalMutationIsAllowed::Yes,
+                    flow_state,
+                );
+                */
+            }
+            TerminatorKind::DropAndReplace {
+                location: ref drop_place,
+                value: ref new_value,
+                target: _,
+                unwind: _,
+            } => {
+                println!("TerminatorKind::DropAndReplace: {:?}", term);
+            }
+
+            TerminatorKind::Assert {
+                ref cond,
+                expected: _,
+                ref msg,
+                target: _,
+                cleanup: _,
+            } => {
+                // Does not seem useful for this check.
+                // println!("TerminatorKind::Assert: {:?}", term);
+            }
+
+            TerminatorKind::Resume | TerminatorKind::Return | TerminatorKind::GeneratorDrop => {
+                // Returning from the function implicitly kills storage for all locals and statics.
+                // Often, the storage will already have been killed by an explicit
+                // StorageDead, but we don't always emit those (notably on unwind paths),
+                // so this "extra check" serves as a kind of backup.
+            }
+            TerminatorKind::Goto { target: _ }
+            | TerminatorKind::Abort
+            | TerminatorKind::Unreachable
+            | TerminatorKind::FalseEdges {
+                real_target: _,
+                imaginary_targets: _,
+            }
+            | TerminatorKind::FalseUnwind {
+                real_target: _,
+                unwind: _,
+            } => {
+                // no data used, thus irrelevant to borrowck
+            }
+            */
         }
     }
 }
