@@ -339,14 +339,27 @@ fn do_mir_borrowck<'a, 'tcx>(
     });
 
     let used_mut_refs = mbcx.used_mut_refs.clone();
+    let mut checked_refs = FxHashSet::default();
+    let alias_sets = mbcx.naa.alias_sets().clone();
     for key in used_mut_refs.iter() {
-        if let Some(alias_set) = mbcx.naa.get_alias_set(&key) {
-            let local_set = alias_set.clone();
-
-            for local in local_set.iter() {
-                mbcx.used_mut_refs.insert(*local);
+        if !checked_refs.contains(&key) {
+            for (base_local, alias_set) in alias_sets.iter() {
+                if alias_set.contains(&key) {
+                    for local in alias_set.iter() {
+                        mbcx.used_mut_refs.insert(*local);
+                        checked_refs.insert(*local);
+                    }
+                }
             }
         }
+
+        // if let Some(alias_set) = mbcx.naa.get_alias_set(&key) {
+        //     let local_set = alias_set.clone();
+
+        //     for local in local_set.iter() {
+        //         mbcx.used_mut_refs.insert(*local);
+        //     }
+        // }
     }
 
     // This prints out the currently assumed set of what can be
@@ -2927,6 +2940,10 @@ impl NaiveAliasAnalysis {
             self.alias_sets.insert(*local, alias_set);
             self.current_alias_map.insert(*new_alias, *local);
         }
+    }
+
+    fn alias_sets(&self) -> &FxHashMap<Local, FxHashSet<Local>> {
+        &self.alias_sets
     }
 
     fn get_alias_set(
