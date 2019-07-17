@@ -130,7 +130,7 @@ fn do_mir_borrowck<'a, 'gcx, 'tcx>(
     input_mir: &Mir<'gcx>,
     def_id: DefId,
 ) -> BorrowCheckResult<'gcx> {
-    // println!("\n\ndo_mir_borrowck(def_id = {:?}", def_id);
+    println!("\n\ndo_mir_borrowck(def_id = {:?}", def_id);
     debug!("do_mir_borrowck(def_id = {:?})", def_id);
 
     let tcx = infcx.tcx;
@@ -379,7 +379,7 @@ fn do_mir_borrowck<'a, 'gcx, 'tcx>(
             }
     });
 
-    // println!("NAA: {:?}", mbcx.naa);
+    println!("NAA: {:?}", mbcx.naa);
 
     for local in local_ptr_set.iter().filter(|local| !used_mut_refs.contains(local)) {
         println!("unused local: {:?}", local);
@@ -406,7 +406,7 @@ fn do_mir_borrowck<'a, 'gcx, 'tcx>(
     // TODO : Separate warning generation for potentially used mutable ptrs.
 
     debug!("mbcx.used_mut: {:?}", mbcx.used_mut);
-    // println!("mbcx.used_mut_refs: {:?}", mbcx.used_mut_refs);
+    println!("mbcx.used_mut_refs: {:?}", mbcx.used_mut_refs);
     let used_mut = mbcx.used_mut;
     for local in mbcx.mir.mut_vars_and_args_iter().filter(|local| !used_mut.contains(local)) {
         if let ClearCrossCrate::Set(ref vsi) = mbcx.mir.source_scope_local_data {
@@ -2326,6 +2326,9 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
         _location: &Location,
         stmt: &Statement<'tcx>,
     ) {
+        println!("Stmt: {:?}", stmt);
+        // TODO : Return type is not correctly added to use cases, this needs to be added.
+        // TODO : Tuples are not completely correct. Look in to this as well. (is there a way to get better granularity?)
         match stmt.kind {
             StatementKind::Assign(ref lhs, ref rhs) => {
                 match lhs {
@@ -2334,12 +2337,116 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
                         match lhs_base {
                             // Value is local to the function
                             PlaceBase::Local(lhs_local) => {
+                                // Add special case check for Local _0 which represents the return type of a function.
+                                if lhs_local.index() == 0 {
+                                    // TODO : Special behavior here.
+                                    
+                                    // All assignments to local _0 must be treated as though they are using assignments 
+                                    // as it is impossible to tell from the function itself how it will be used at the 
+                                    // call site. Thus, like the function calls, this will be added to the may_use section.
+                                    match *rhs.clone() {
+                                        Rvalue::Use(operand) => {
+                                            println!("ReturnStatment::Use: {:?}", rhs);
+                                            
+                                            match operand {
+                                                    Operand::Copy(place) | Operand::Move(place) => {
+                                                        if let Some(rhs_local) = place.base_local() {
+                                                            self.may_mut_refs.insert(rhs_local);
+                                                        }
+                                                    },
+                                                    Operand::Constant(_con) => {},
+                                                }
+                                        },
+                                        Rvalue::Repeat(operand, rep) => {
+                                            println!("ReturnStatment::Repeat: {:?}", rhs);
+
+                                            match operand {
+                                                    Operand::Copy(place) | Operand::Move(place) => {
+                                                        if let Some(rhs_local) = place.base_local() {
+                                                            self.may_mut_refs.insert(rhs_local);
+                                                        }
+                                                    },
+                                                    Operand::Constant(_con) => {},
+                                                }
+                                        },
+                                        Rvalue::Ref(region, borrow_kind, place) => {
+                                            println!("ReturnStatment::Ref: {:?}", rhs);
+
+                                            if let Some(rhs_local) = place.base_local() {
+                                                self.may_mut_refs.insert(rhs_local);
+                                                self.naa.add_alias(&lhs_local, &rhs_local)
+                                            }
+                                        },
+                                        Rvalue::Cast(cast_kind, operand, ty) => {
+                                            println!("ReturnStatment::Cast: {:?}", rhs);
+
+                                            match ty.sty {
+                                                TyKind::RawPtr(type_and_mut) => {
+                                                    if type_and_mut.mutbl == MutMutable {
+                                                        match operand {
+                                                            Operand::Copy(place) | Operand::Move(place) => {
+                                                                if let Some(rhs_local) = place.base_local() {
+                                                                    self.may_mut_refs.insert(rhs_local);
+                                                                }
+                                                            },
+                                                            Operand::Constant(_con) => {},
+                                                        }
+                                                    }
+                                                },
+                                                TyKind::Ref(region, ty, mutability) => {
+                                                    if mutability == MutMutable {
+                                                        match operand {
+                                                            Operand::Copy(place) | Operand::Move(place) => {
+                                                                if let Some(rhs_local) = place.base_local() {
+                                                                    self.may_mut_refs.insert(rhs_local);
+                                                                }
+                                                            },
+                                                            Operand::Constant(_con) => {},
+                                                        }
+                                                    }
+                                                },
+                                                _ => {},
+                                            }
+                                        },
+                                        Rvalue::UnaryOp(un_op, operand) => {
+                                            println!("ReturnStatment::UnaryOp: {:?}", rhs);
+                                        },
+                                        Rvalue::Discriminant(place) => {
+                                            println!("ReturnStatment::Discriminant: {:?}", rhs);
+                                        },
+                                        Rvalue::Aggregate(aggr_kind, operand_vec) => {
+                                            println!("ReturnStatment::Aggregate: {:?}", rhs);
+
+                                            for operand in operand_vec.iter() {
+                                                match operand {
+                                                    Operand::Copy(place) | Operand::Move(place) => {
+                                                        if let Some(rhs_local) = place.base_local() {
+                                                            self.may_mut_refs.insert(rhs_local);
+                                                        }
+                                                    },
+                                                    Operand::Constant(_con) => {},
+                                                }
+                                            }
+                                        },
+                                        _ => {},
+                                    }
+
+                                    return  // remainder of assignment no longer applies, return early.
+                                }
+
                                 // Check if LHS is a reference type, if it is break it down in to further possibilities
                                 match self.mir.local_decls[*lhs_local].ty.sty {
                                     TyKind::Ref(_, _ty, mutable) => {
                                         if MutMutable == mutable {
                                             match *rhs.clone() {
-                                                Rvalue::Ref(_, _borrow_kind, _place) => {},
+                                                // TODO : Need to cover more cases. Ref was our short man out here, but Aggregate will likely also cause trouble.
+                                                Rvalue::Ref(_region, borrow_kind, place) => {
+                                                    if let BorrowKind::Mut{ allow_two_phase_borrow: _ } = borrow_kind {
+                                                        if let Some(rhs_local) = place.base_local() {
+                                                            self.naa.add_alias(&lhs_local, &rhs_local);
+                                                        }
+                                                    }
+                                                },
                                                 Rvalue::Use(op) => {
                                                     match op {
                                                         Operand::Copy(_place) => {
@@ -2467,6 +2574,11 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
         location: &Location,
         term: &Terminator<'tcx>,
     ) {
+        // TODO : Return type is not correctly added to use cases, this needs to be added.
+        // Return is done as an assignment specifically to local _0, which can be assigned single values, 
+        // structs, or collections of values (a, b). Checking for assignment to _0 can 
+        // be used as potentially mutable behavior if the return type is mutable.
+
         // println!("MirBorrockCtxt::check_terminator({:?}, {:?})", location, term);
         debug!(
             "MirBorrowckCtxt::process_terminator({:?}, {:?})",
@@ -2481,6 +2593,9 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
                 cleanup: _,
                 from_hir_call: _,
             } => {
+                // println!("FunctionCall: {:?}", term);
+                // println!("Destination: {:?}", destination);
+
                 // This area is where things get interesting for use cases. 
                 // A function call leads to a situation where one of our locals
                 // MAY be used within the context of the function call, but 
@@ -2543,81 +2658,6 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
             }
 
             _ => { /* Pass over remaining types */ }
-            /*
-            TerminatorKind::Drop {
-                location: ref drop_place,
-                target: _,
-                unwind: _,
-            } => {
-                // println!("TermintorKind::Drop: {:?}", term);
-
-                /*
-                let gcx = self.infcx.tcx.global_tcx();
-
-                // Compute the type with accurate region information.
-                let drop_place_ty = drop_place.ty(self.mir, self.infcx.tcx);
-
-                // Erase the regions.
-                let drop_place_ty = self.infcx.tcx.erase_regions(&drop_place_ty).ty;
-
-                // "Lift" into the gcx -- once regions are erased, this type should be in the
-                // global arenas; this "lift" operation basically just asserts that is true, but
-                // that is useful later.
-                let drop_place_ty = gcx.lift(&drop_place_ty).unwrap();
-
-                debug!("visit_terminator_drop \
-                        loc: {:?} term: {:?} drop_place: {:?} drop_place_ty: {:?} span: {:?}",
-                       loc, term, drop_place, drop_place_ty, span);
-
-                self.access_place(
-                    ContextKind::Drop.new(loc),
-                    (drop_place, span),
-                    (AccessDepth::Drop, Write(WriteKind::StorageDeadOrDrop)),
-                    LocalMutationIsAllowed::Yes,
-                    flow_state,
-                );
-                */
-            }
-            TerminatorKind::DropAndReplace {
-                location: ref drop_place,
-                value: ref new_value,
-                target: _,
-                unwind: _,
-            } => {
-                println!("TerminatorKind::DropAndReplace: {:?}", term);
-            }
-            
-            TerminatorKind::Assert {
-                ref cond,
-                expected: _,
-                ref msg,
-                target: _,
-                cleanup: _,
-            } => {
-                // Does not seem useful for this check.
-                // println!("TerminatorKind::Assert: {:?}", term);
-            }
-
-            TerminatorKind::Resume | TerminatorKind::Return | TerminatorKind::GeneratorDrop => {
-                // Returning from the function implicitly kills storage for all locals and statics.
-                // Often, the storage will already have been killed by an explicit
-                // StorageDead, but we don't always emit those (notably on unwind paths),
-                // so this "extra check" serves as a kind of backup.
-            }
-            TerminatorKind::Goto { target: _ }
-            | TerminatorKind::Abort
-            | TerminatorKind::Unreachable
-            | TerminatorKind::FalseEdges {
-                real_target: _,
-                imaginary_targets: _,
-            }
-            | TerminatorKind::FalseUnwind {
-                real_target: _,
-                unwind: _,
-            } => {
-                // no data used, thus irrelevant to borrowck
-            }
-            */
         }
     }
 }
@@ -2700,6 +2740,10 @@ impl NaiveAliasAnalysis {
         new_alias: &Local,
         local: &Local,
     ) {
+        // FIXME : Turns out this is naive, go figure. Current issue, in an if, else, case, only one of the two 
+        // current aliases will be in the map (typically the else local alias) and so in adding them later, 
+        // one of the two can possibly be overlooked. Not sure how to fix this yet, but it definitely needs to be.
+
         // First check if local is already an alias
         if let Some(base_local) = self.current_alias_map.get(local) {
             // local is an alias for base_local
