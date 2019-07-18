@@ -130,7 +130,7 @@ fn do_mir_borrowck<'a, 'gcx, 'tcx>(
     input_mir: &Mir<'gcx>,
     def_id: DefId,
 ) -> BorrowCheckResult<'gcx> {
-    println!("\n\ndo_mir_borrowck(def_id = {:?}", def_id);
+    // println!("\n\ndo_mir_borrowck(def_id = {:?}", def_id);
     debug!("do_mir_borrowck(def_id = {:?})", def_id);
 
     let tcx = infcx.tcx;
@@ -325,27 +325,18 @@ fn do_mir_borrowck<'a, 'gcx, 'tcx>(
     });
 
     let used_mut_refs = mbcx.used_mut_refs.clone();
-    let mut checked_refs = FxHashSet::default();
-    let alias_sets = mbcx.naa.alias_sets().clone();
     for key in used_mut_refs.iter() {
-        if !checked_refs.contains(&key) {
-            for (base_local, alias_set) in alias_sets.iter() {
-                if alias_set.contains(&key) {
-                    for local in alias_set.iter() {
+        if let Some(alias_key_set) = mbcx.naa.alias_keys(&key) {
+            for alias_key in alias_key_set.iter() {
+                if let Some(alias_set) = mbcx.naa.get_alias_set(&alias_key) {
+                    let local_set = alias_set.clone();
+
+                    for local in local_set.iter() {
                         mbcx.used_mut_refs.insert(*local);
-                        checked_refs.insert(*local);
                     }
                 }
             }
         }
-
-        // if let Some(alias_set) = mbcx.naa.get_alias_set(&key) {
-        //     let local_set = alias_set.clone();
-
-        //     for local in local_set.iter() {
-        //         mbcx.used_mut_refs.insert(*local);
-        //     }
-        // }
     }
     
     // This prints out the currently assumed set of what can be 
@@ -392,10 +383,10 @@ fn do_mir_borrowck<'a, 'gcx, 'tcx>(
             }
     });
 
-    println!("NAA: {:?}", mbcx.naa);
+    // println!("NAA: {:?}", mbcx.naa);
 
     for local in local_ptr_set.iter().filter(|local| !used_mut_refs.contains(local)) {
-        println!("unused local: {:?}", local);
+        // println!("unused local: {:?}", local);
         if let ClearCrossCrate::Set(ref vsi) = mbcx.mir().source_scope_local_data {
             let local_decl = &mbcx.mir.local_decls[*local];
             let span = local_decl.source_info.span;
@@ -419,7 +410,7 @@ fn do_mir_borrowck<'a, 'gcx, 'tcx>(
     // TODO : Separate warning generation for potentially used mutable ptrs.
 
     debug!("mbcx.used_mut: {:?}", mbcx.used_mut);
-    println!("mbcx.used_mut_refs: {:?}", mbcx.used_mut_refs);
+    // println!("mbcx.used_mut_refs: {:?}", mbcx.used_mut_refs);
     let used_mut = mbcx.used_mut;
     for local in mbcx.mir.mut_vars_and_args_iter().filter(|local| !used_mut.contains(local)) {
         if let ClearCrossCrate::Set(ref vsi) = mbcx.mir.source_scope_local_data {
@@ -2339,7 +2330,7 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
         _location: &Location,
         stmt: &Statement<'tcx>,
     ) {
-        println!("Stmt: {:?}", stmt);
+        // println!("Stmt: {:?}", stmt);
         // TODO : Return type is not correctly added to use cases, this needs to be added.
         // TODO : Tuples are not completely correct. Look in to this as well. (is there a way to get better granularity?)
         match stmt.kind {
@@ -2359,7 +2350,7 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
                                     // call site. Thus, like the function calls, this will be added to the may_use section.
                                     match *rhs.clone() {
                                         Rvalue::Use(operand) => {
-                                            println!("ReturnStatment::Use: {:?}", rhs);
+                                            // println!("ReturnStatment::Use: {:?}", rhs);
                                             
                                             match operand {
                                                     Operand::Copy(place) | Operand::Move(place) => {
@@ -2370,8 +2361,8 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
                                                     Operand::Constant(_con) => {},
                                                 }
                                         },
-                                        Rvalue::Repeat(operand, rep) => {
-                                            println!("ReturnStatment::Repeat: {:?}", rhs);
+                                        Rvalue::Repeat(operand, _rep) => {
+                                            // println!("ReturnStatment::Repeat: {:?}", rhs);
 
                                             match operand {
                                                     Operand::Copy(place) | Operand::Move(place) => {
@@ -2382,16 +2373,16 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
                                                     Operand::Constant(_con) => {},
                                                 }
                                         },
-                                        Rvalue::Ref(region, borrow_kind, place) => {
-                                            println!("ReturnStatment::Ref: {:?}", rhs);
+                                        Rvalue::Ref(_region, _borrow_kind, place) => {
+                                            // println!("ReturnStatment::Ref: {:?}", rhs);
 
                                             if let Some(rhs_local) = place.base_local() {
                                                 self.may_mut_refs.insert(rhs_local);
                                                 self.naa.add_alias(&lhs_local, &rhs_local)
                                             }
                                         },
-                                        Rvalue::Cast(cast_kind, operand, ty) => {
-                                            println!("ReturnStatment::Cast: {:?}", rhs);
+                                        Rvalue::Cast(_cast_kind, operand, ty) => {
+                                            // println!("ReturnStatment::Cast: {:?}", rhs);
 
                                             match ty.sty {
                                                 TyKind::RawPtr(type_and_mut) => {
@@ -2406,7 +2397,7 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
                                                         }
                                                     }
                                                 },
-                                                TyKind::Ref(region, ty, mutability) => {
+                                                TyKind::Ref(_region, _ty, mutability) => {
                                                     if mutability == MutMutable {
                                                         match operand {
                                                             Operand::Copy(place) | Operand::Move(place) => {
@@ -2421,14 +2412,14 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
                                                 _ => {},
                                             }
                                         },
-                                        Rvalue::UnaryOp(un_op, operand) => {
+                                        Rvalue::UnaryOp(_un_op, _operand) => {
                                             println!("ReturnStatment::UnaryOp: {:?}", rhs);
                                         },
-                                        Rvalue::Discriminant(place) => {
+                                        Rvalue::Discriminant(_place) => {
                                             println!("ReturnStatment::Discriminant: {:?}", rhs);
                                         },
-                                        Rvalue::Aggregate(aggr_kind, operand_vec) => {
-                                            println!("ReturnStatment::Aggregate: {:?}", rhs);
+                                        Rvalue::Aggregate(_aggr_kind, operand_vec) => {
+                                            // println!("ReturnStatment::Aggregate: {:?}", rhs);
 
                                             for operand in operand_vec.iter() {
                                                 match operand {
@@ -2735,7 +2726,7 @@ impl ContextKind {
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 struct NaiveAliasAnalysis {
     alias_sets: FxHashMap<Local, FxHashSet<Local>>,
-    current_alias_map : FxHashMap<Local, Local>,
+    current_alias_map : FxHashMap<Local, Vec<Local>>,
 }
 
 impl NaiveAliasAnalysis {
@@ -2758,16 +2749,31 @@ impl NaiveAliasAnalysis {
         // one of the two can possibly be overlooked. Not sure how to fix this yet, but it definitely needs to be.
 
         // First check if local is already an alias
-        if let Some(base_local) = self.current_alias_map.get(local) {
-            // local is an alias for base_local
-            if let Some(alias_set) = self.alias_sets.get_mut(base_local) {
-                // add new alias to alias set.
-                alias_set.insert(new_alias.clone());
-            }
+        if let Some(base_vec) = self.current_alias_map.get(local) {
+            let local_vec = base_vec.clone();
 
-            // Helps avoid borrow problems.
-            let local_base = *base_local;
-            self.current_alias_map.insert(new_alias.clone(), local_base);
+            for local in local_vec.iter() {
+                let base_local = local.clone();
+
+                // local is an alias for base_local
+                if let Some(alias_set) = self.alias_sets.get_mut(&base_local) {
+                    // add new alias to alias set.
+                    alias_set.insert(new_alias.clone());
+                }
+
+                // Helps avoid borrow problems.
+                let local_base = base_local;
+
+                // Having an issue with conditionals removing one of at least 
+                // two different base_locals for any given alias map. Conditional 
+                // check will expand an alias' potential base local set if some 
+                // mapping definition currently exists.
+                if let Some(base_vec) = self.current_alias_map.get_mut(new_alias) {
+                    base_vec.push(local_base);
+                } else {
+                    self.current_alias_map.insert(new_alias.clone(), vec![local_base]);
+                }
+            }
         } else {
             // local is not currently an alias for any value,
             // create alias_set for it, then add alias and base_local 
@@ -2777,21 +2783,24 @@ impl NaiveAliasAnalysis {
             alias_set.insert(*new_alias);
 
             self.alias_sets.insert(*local, alias_set);
-            self.current_alias_map.insert(*new_alias, *local);
+            self.current_alias_map.insert(*new_alias, vec![*local]);
         }
     }
 
-    fn alias_sets(&self) -> &FxHashMap<Local, FxHashSet<Local>> {
-        &self.alias_sets
+    fn alias_keys(
+        &self,
+        key: &Local,
+    ) -> Option<Vec<Local>> {
+        if let Some(alias_key_set) = self.current_alias_map.get(key) {
+            return Some(alias_key_set.clone())
+        }
+        None
     }
 
     fn get_alias_set(
         &self, 
         key: &Local,
     ) -> Option<&FxHashSet<Local>> {
-        if let Some(alias_key) = self.current_alias_map.get(key) {
-            return self.alias_sets.get(alias_key)
-        }
-        None
+        return self.alias_sets.get(key)
     }
 }
