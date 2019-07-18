@@ -2417,7 +2417,6 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
         stmt: &Statement<'tcx>,
     ) {
         // println!("Stmt: {:?}", stmt);
-        // TODO : Return type is not correctly added to use cases, this needs to be added.
         // TODO : Tuples are not completely correct. Look in to this as well. (is there a way to get better granularity?)
         match stmt.kind {
             StatementKind::Assign(ref lhs, ref rhs) => {
@@ -2429,10 +2428,8 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
                             PlaceBase::Local(lhs_local) => {
                                 // Add special case check for Local _0 which represents the return type of a function.
                                 if lhs_local.index() == 0 {
-                                    // TODO : Special behavior here.
-
                                     // All assignments to local _0 must be treated as though they are using assignments
-                                    // as it is impossible to tell from the function itself how it will be used at the
+                                    // as it is impossible to tell from the function itself how it will be used at the 
                                     // call site. Thus, like the function calls, this will be added to the may_use section.
                                     match *rhs.clone() {
                                         Rvalue::Use(operand) => {
@@ -2726,8 +2723,6 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
                         },
                     }
                 }
-
-                // TODO : If we return a mutable pointer from a function, how do we track that? Assume that it must be mutable?
             }
             TerminatorKind::SwitchInt {
                 discr: _,
