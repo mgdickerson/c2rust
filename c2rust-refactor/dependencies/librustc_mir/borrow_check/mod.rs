@@ -346,41 +346,32 @@ fn do_mir_borrowck<'a, 'gcx, 'tcx>(
     let used_mut_refs = mbcx.used_mut_refs.clone();
     let mut local_ptr_set : FxHashSet<Local> = mbcx.mir.vars_iter()
         .filter_map(|local| {
-            let local_decl = mbcx.mir.local_decls[local].clone();
-            let decl_ty = local_decl.ty.sty.clone();
-            match decl_ty {
-                TyKind::Ref(_, _, mutability) => {
-                    if MutMutable == mutability {
-                        return Some(local)
-                    }
-                }
-                TyKind::RawPtr(data) => {
-                    if MutMutable == data.mutbl {
-                        return Some(local)
-                    }
-                }
-                _ => {}
+            if mbcx.is_ty_mut_ref(mbcx.mir.local_decls[local].ty) {
+                Some(local)
+            } else {
+                None
             }
-
-            None
         })
         .collect();
     mbcx.mir.args_iter().for_each(|arg| {
-        let local_decl = mbcx.mir.local_decls[arg].clone();
-        let decl_ty = local_decl.ty.sty.clone();
-            match decl_ty {
-                TyKind::Ref(_, _, mutability) => {
-                    if MutMutable == mutability {
-                        local_ptr_set.insert(arg);
-                    }
-                }
-                TyKind::RawPtr(data) => {
-                    if MutMutable == data.mutbl {
-                        local_ptr_set.insert(arg);
-                    }
-                }
-                _ => {}
-            }
+        if mbcx.is_ty_mut_ref(mbcx.mir.local_decls[arg].ty) {
+            local_ptr_set.insert(arg);
+        }
+        // let local_decl = mbcx.mir.local_decls[arg].clone();
+        // let decl_ty = local_decl.ty.sty.clone();
+        //     match decl_ty {
+        //         TyKind::Ref(_, _, mutability) => {
+        //             if MutMutable == mutability {
+        //                 local_ptr_set.insert(arg);
+        //             }
+        //         }
+        //         TyKind::RawPtr(data) => {
+        //             if MutMutable == data.mutbl {
+        //                 local_ptr_set.insert(arg);
+        //             }
+        //         }
+        //         _ => {}
+        //     }
     });
 
     // println!("NAA: {:?}", mbcx.naa);
@@ -2330,7 +2321,7 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
         _location: &Location,
         stmt: &Statement<'tcx>,
     ) {
-        // println!("Stmt: {:?}", stmt);
+        println!("Stmt: {:?}", stmt);
         // TODO : Tuples are not completely correct. Look in to this as well. (is there a way to get better granularity?)
         // TODO : Arrays of mutable types are not checked either, and thus not properly marked as not needing to be mutable. (Not even sure we want to mess with this).
         match stmt.kind {
@@ -2369,23 +2360,10 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
                                         },
                                         Rvalue::Cast(_cast_kind, operand, ty) => {
                                             // println!("ReturnStatment::Cast: {:?}", rhs);
-
-                                            match ty.sty {
-                                                TyKind::RawPtr(type_and_mut) => {
-                                                    if type_and_mut.mutbl == MutMutable {
-                                                        if let Some(rhs_local) = MirBorrowckCtxt::op_local(&operand) {
+                                            if self.is_ty_mut_ref(ty) {
+                                                if let Some(rhs_local) = MirBorrowckCtxt::op_local(&operand) {
                                                             self.may_mut_refs.insert(rhs_local);
                                                         }
-                                                    }
-                                                },
-                                                TyKind::Ref(_region, _ty, mutability) => {
-                                                    if mutability == MutMutable {
-                                                        if let Some(rhs_local) = MirBorrowckCtxt::op_local(&operand) {
-                                                            self.may_mut_refs.insert(rhs_local);
-                                                        }
-                                                    }
-                                                },
-                                                _ => {},
                                             }
                                         },
                                         Rvalue::UnaryOp(_un_op, _operand) => {
@@ -2447,72 +2425,6 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
                                         },
                                     }
                                 }
-
-                                // match self.mir.local_decls[*lhs_local].ty.sty {
-                                //     TyKind::Ref(_, _ty, mutable) => {
-                                //         if MutMutable == mutable {
-                                //             match *rhs.clone() {
-                                //                 // TODO : Need to cover more cases. Ref was our short man out here, but Aggregate will likely also cause trouble.
-                                //                 Rvalue::Ref(_region, borrow_kind, place) => {
-                                //                     if let BorrowKind::Mut{ allow_two_phase_borrow: _ } = borrow_kind {
-                                //                         if let Some(rhs_local) = place.base_local() {
-                                //                             self.naa.add_alias(&lhs_local, &rhs_local);
-                                //                         }
-                                //                     }
-                                //                 },
-                                //                 Rvalue::Use(op) => {
-                                //                     if let Some(rhs_local) = MirBorrowckCtxt::op_local(&op) {
-                                //                         self.naa.add_alias(&lhs_local, &rhs_local);
-                                //                     }
-                                //                 },
-                                //                 _ => {
-                                //                     // Currently all types not checked for will constitute 
-                                //                     // some form of legal assignment and should be added
-                                //                     // to the set of used mutable references.
-                                //                     self.used_mut_refs.insert(*lhs_local);
-                                //                 },
-                                //             }
-                                //         }
-                                //     },
-
-                                //     TyKind::RawPtr(data) => {
-                                //         if data.mutbl == MutMutable {
-                                //             match *rhs.clone() {
-                                //                 Rvalue::Ref(_, borrow_kind, place) => {
-                                //                     println!("Rhs.Ref(_, borrow_kind: {:?}, place: {:?}", borrow_kind, place);
-                                //                 },
-                                //                 Rvalue::Use(op) => {
-                                //                     if let Some(rhs_local) = MirBorrowckCtxt::op_local(&op) {
-                                //                         self.naa.add_alias(&lhs_local, &rhs_local);
-                                //                     }
-                                //                 },
-                                //                 Rvalue::Discriminant(place) => {
-                                //                     println!("Rhs.Discriminant(place: {:?}", place);
-                                //                 }
-                                //                 Rvalue::Cast(_cast_kind, operand, ty) => {
-                                //                     // First check if cast type is to a mutable type.
-                                //                     // A side effect of this check is that any casting to a non-mutable 
-                                //                     // type will not be tracked through the locals any longer. This is 
-                                //                     // important as if the program explicitly makes a *const out of some 
-                                //                     // mutable reference, it should be treated as though it no longer can 
-                                //                     // be used mutably. (switching a const to a mutable later is unsafe).
-                                //                     if self.is_ty_mut_ref(ty) {
-                                //                         // Cast type is mutable, add local to the tracked list.
-                                //                         if let Some(rhs_local) = MirBorrowckCtxt::op_local(&operand) {
-                                //                             self.naa.add_alias(&lhs_local, &rhs_local);
-                                //                         }
-                                //                     }
-                                //                 },
-                                //                 _ => {
-                                //                     // Not really sure what other types would go here.
-                                //                     println!("Other RHS for RawPtr: {:?}", stmt);
-                                //                 },
-                                //             }
-                                //         }
-                                //     },
-
-                                //     _ => { /* Currently the remaining types are passed over */ },
-                                // }
                             },
 
                             PlaceBase::Static(lhs_stat) => {
@@ -2562,83 +2474,6 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
                                         _ => { /* Counts as an assignment of any given mutable static type */ },
                                     }
                                 }
-
-                                // match lhs_stat.ty.sty {
-                                //     TyKind::Ref(_, _ty, mutable) => {
-                                //         if mutable == MutMutable {
-                                //             match *rhs.clone() {
-                                //                 Rvalue::Ref(_, _borrow_kind, place) => {
-                                //                     // Assigning a reference of any type to a mutable static will constitute a use as 
-                                //                     // it can no longer be tracked within the scope of any given function.
-                                //                     if let Some(rhs_local) = place.base_local() {
-                                //                         self.used_mut_refs.insert(rhs_local);
-                                //                     }
-                                //                 },
-                                //                 Rvalue::Use(operand) => {
-                                //                     // This operand can now be considered as used. Same as case above.
-                                //                     if let Some(rhs_local) = MirBorrowckCtxt::op_local(&operand) {
-                                //                         self.used_mut_refs.insert(rhs_local);
-                                //                     }
-                                //                 },
-                                //                 Rvalue::Cast(_cast_kind, operand, ty) => {
-                                //                     // First check if cast type is to a mutable type.
-                                //                     // A side effect of this check is that any casting to a non-mutable 
-                                //                     // type will not be tracked through the locals any longer. This is 
-                                //                     // important as if the program explicitly makes a *const out of some 
-                                //                     // mutable reference, it should be treated as though it no longer can 
-                                //                     // be used mutably. (switching a const to a mutable later is unsafe).
-                                //                     if self.is_ty_mut_ref(ty) {
-                                //                         // Cast type is mutable, add local to the tracked list.
-                                //                         if let Some(rhs_local) = MirBorrowckCtxt::op_local(&operand) {
-                                //                             self.used_mut_refs.insert(rhs_local);
-                                //                         }
-                                //                     }
-                                //                 },
-                                //                 _ => { /* Counts as an assignment of any given mutable static type */ },
-                                //             }
-                                //         }
-                                //     },
-                                //     TyKind::RawPtr(data) => {
-                                //         if data.mutbl == MutMutable {
-                                //             match *rhs.clone() {
-                                //                 Rvalue::Ref(_, _borrow_kind, place) => {
-                                //                     // Assigning a reference of any type to a mutable static will constitute a use as 
-                                //                     // it can no longer be tracked within the scope of any given function.
-                                //                     if let Some(rhs_local) = place.base_local() {
-                                //                         self.used_mut_refs.insert(rhs_local);
-                                //                     }
-                                //                 },
-                                //                 Rvalue::Use(operand) => {
-                                //                     // This operand can now be considered as used. Same as case above.
-                                //                     match operand {
-                                //                         Operand::Copy(place) | Operand::Move(place) => {
-                                //                             if let Some(rhs_local) = place.base_local() {
-                                //                                 self.used_mut_refs.insert(rhs_local);
-                                //                             }
-                                //                         },
-                                //                         Operand::Constant(_con) => { /* Not tracked */ },
-                                //                     }
-                                //                 },
-                                //                 Rvalue::Cast(_cast_kind, operand, ty) => {
-                                //                     // First check if cast type is to a mutable type.
-                                //                     // A side effect of this check is that any casting to a non-mutable 
-                                //                     // type will not be tracked through the locals any longer. This is 
-                                //                     // important as if the program explicitly makes a *const out of some 
-                                //                     // mutable reference, it should be treated as though it no longer can 
-                                //                     // be used mutably. (switching a const to a mutable later is unsafe).
-                                //                     if self.is_ty_mut_ref(ty) {
-                                //                         // Cast type is mutable, add local to the tracked list.
-                                //                         if let Some(rhs_local) = MirBorrowckCtxt::op_local(&operand) {
-                                //                             self.used_mut_refs.insert(rhs_local);
-                                //                         }
-                                //                     }
-                                //                 },
-                                //                 _ => { /* Counts as an assignment of any given mutable static type */ },
-                                //             }
-                                //         }
-                                //     },
-                                //     _ => { /* Currently skip all other cases */ },
-                                // }
                             },
                         }
                     },
