@@ -360,41 +360,32 @@ fn do_mir_borrowck<'a, 'tcx>(
     let used_mut_refs = mbcx.used_mut_refs.clone();
     let mut local_ptr_set : FxHashSet<Local> = mbcx.body.vars_iter()
         .filter_map(|local| {
-            let local_decl = mbcx.body.local_decls[local].clone();
-            let decl_ty = local_decl.ty.sty.clone();
-            match decl_ty {
-                TyKind::Ref(_, _, mutability) => {
-                    if MutMutable == mutability {
-                        return Some(local)
-                    }
-                }
-                TyKind::RawPtr(data) => {
-                    if MutMutable == data.mutbl {
-                        return Some(local)
-                    }
-                }
-                _ => {}
+            if mbcx.is_ty_mut_ref(mbcx.body.local_decls[local].ty) {
+                Some(local)
+            } else {
+                None
             }
-
-            None
         })
         .collect();
     mbcx.body.args_iter().for_each(|arg| {
-        let local_decl = mbcx.body.local_decls[arg].clone();
-        let decl_ty = local_decl.ty.sty.clone();
-            match decl_ty {
-                TyKind::Ref(_, _, mutability) => {
-                    if MutMutable == mutability {
-                        local_ptr_set.insert(arg);
-                    }
-                }
-                TyKind::RawPtr(data) => {
-                    if MutMutable == data.mutbl {
-                        local_ptr_set.insert(arg);
-                    }
-                }
-                _ => {}
-            }
+        if mbcx.is_ty_mut_ref(mbcx.body.local_decls[arg].ty) {
+            local_ptr_set.insert(arg);
+        }
+        // let local_decl = mbcx.body.local_decls[arg].clone();
+        // let decl_ty = local_decl.ty.sty.clone();
+        //     match decl_ty {
+        //         TyKind::Ref(_, _, mutability) => {
+        //             if MutMutable == mutability {
+        //                 local_ptr_set.insert(arg);
+        //             }
+        //         }
+        //         TyKind::RawPtr(data) => {
+        //             if MutMutable == data.mutbl {
+        //                 local_ptr_set.insert(arg);
+        //             }
+        //         }
+        //         _ => {}
+        //     }
     });
 
     // println!("NAA: {:?}", mbcx.naa);
@@ -2416,7 +2407,7 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
         _location: &Location,
         stmt: &Statement<'tcx>,
     ) {
-        // println!("Stmt: {:?}", stmt);
+        println!("Stmt: {:?}", stmt);
         // TODO : Tuples are not completely correct. Look in to this as well. (is there a way to get better granularity?)
         // TODO : Arrays of mutable types are not checked either, and thus not properly marked as not needing to be mutable. (Not even sure we want to mess with this).
         match stmt.kind {
@@ -2455,23 +2446,10 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
                                         },
                                         Rvalue::Cast(_cast_kind, operand, ty) => {
                                             // println!("ReturnStatment::Cast: {:?}", rhs);
-
-                                            match ty.sty {
-                                                TyKind::RawPtr(type_and_mut) => {
-                                                    if type_and_mut.mutbl == MutMutable {
-                                                        if let Some(rhs_local) = MirBorrowckCtxt::op_local(&operand) {
+                                            if self.is_ty_mut_ref(ty) {
+                                                if let Some(rhs_local) = MirBorrowckCtxt::op_local(&operand) {
                                                             self.may_mut_refs.insert(rhs_local);
                                                         }
-                                                    }
-                                                },
-                                                TyKind::Ref(_region, _ty, mutability) => {
-                                                    if mutability == MutMutable {
-                                                        if let Some(rhs_local) = MirBorrowckCtxt::op_local(&operand) {
-                                                            self.may_mut_refs.insert(rhs_local);
-                                                        }
-                                                    }
-                                                },
-                                                _ => {},
                                             }
                                         },
                                         Rvalue::UnaryOp(_un_op, _operand) => {
