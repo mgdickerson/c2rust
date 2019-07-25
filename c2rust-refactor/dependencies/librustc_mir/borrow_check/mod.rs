@@ -357,21 +357,6 @@ fn do_mir_borrowck<'a, 'gcx, 'tcx>(
         if mbcx.is_ty_mut_ref(mbcx.mir.local_decls[arg].ty) {
             local_ptr_set.insert(arg);
         }
-        // let local_decl = mbcx.mir.local_decls[arg].clone();
-        // let decl_ty = local_decl.ty.sty.clone();
-        //     match decl_ty {
-        //         TyKind::Ref(_, _, mutability) => {
-        //             if MutMutable == mutability {
-        //                 local_ptr_set.insert(arg);
-        //             }
-        //         }
-        //         TyKind::RawPtr(data) => {
-        //             if MutMutable == data.mutbl {
-        //                 local_ptr_set.insert(arg);
-        //             }
-        //         }
-        //         _ => {}
-        //     }
     });
 
     // println!("NAA: {:?}", mbcx.naa);
@@ -2321,9 +2306,12 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
         _location: &Location,
         stmt: &Statement<'tcx>,
     ) {
-        println!("Stmt: {:?}", stmt);
-        // TODO : Tuples are not completely correct. Look in to this as well. (is there a way to get better granularity?)
-        // TODO : Arrays of mutable types are not checked either, and thus not properly marked as not needing to be mutable. (Not even sure we want to mess with this).
+        // println!("Stmt: {:?}", stmt);
+        // TODO : Tuples (and likely other types of aggregate data) lack an immediate ability to increase 
+        //        granularity of analysis as they share the same local making it difficult to target a single
+        //        local as not needing to be mutable. (&mut i32, &mut i32) not working either....
+        // TODO : Arrays types are now checked, though not if a non-mutable reference of them is passed.
+        //        (ie: arr: & [&mut; n]; where arr is not used mutably will not be tracked as unnecessary mutability).
         match stmt.kind {
             StatementKind::Assign(ref lhs, ref rhs) => {
                 match lhs {
@@ -2483,29 +2471,34 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
                     // at some point I will need to look in to seeing if there is a better way 
                     // of getting some level of granularity with projection
                     Place::Projection(proj) => {
-                        match proj.elem {
-                            ProjectionElem::Deref => {
-                                if let Place::Base(PlaceBase::Local(local)) = proj.base {
-                                    // This basically covers super basic cases of aliasing, should probably make recursive call function of it.
-                                    self.used_mut_refs.insert(local);
-                                }
-                            },
-                            ProjectionElem::Index(_index) => {
-                                if let Place::Base(PlaceBase::Local(local)) = proj.base {
-                                    self.used_mut_refs.insert(local);
-                                }
-                            },
-                            ProjectionElem::Field(_field, _t) => {
-                                if let Place::Base(PlaceBase::Local(local)) = proj.base {
-                                    self.used_mut_refs.insert(local);
-                                }
-                            },
-                            _ => { 
-                                if let Place::Base(PlaceBase::Local(local)) = proj.base {
-                                    self.used_mut_refs.insert(local);
-                                }
-                            },
+                        // Currently elem is not used for any level of distinction. It may be necessary,
+                        // but for now to reduce code size replacing it with inner work.
+                        if let Ok(local) = self.get_proj_local(&proj.base) {
+                            self.used_mut_refs.insert(local);
                         }
+
+                        // match proj.elem {
+                        //     ProjectionElem::Deref => {
+                        //         if let Ok(local) = self.get_proj_local(&proj.base) {
+                        //             self.used_mut_refs.insert(local);
+                        //         }
+                        //     },
+                        //     ProjectionElem::Index(_index) => {
+                        //         if let Ok(local) = self.get_proj_local(&proj.base) {
+                        //             self.used_mut_refs.insert(local);
+                        //         }
+                        //     },
+                        //     ProjectionElem::Field(_field, _t) => {
+                        //         if let Ok(local) = self.get_proj_local(&proj.base) {
+                        //             self.used_mut_refs.insert(local);
+                        //         }
+                        //     },
+                        //     _ => { 
+                        //         if let Ok(local) = self.get_proj_local(&proj.base) {
+                        //             self.used_mut_refs.insert(local);
+                        //         }
+                        //     },
+                        // }
                     },
                 }
             }
@@ -2513,21 +2506,19 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
                 println!("InlineAsm: {:?}", stmt);
             }
             _ => { /* Remaining types do not apply */ },
+        }
+    }
 
-            // Commenting out so that warnings are quiet.
-            // StatementKind::SetDiscriminant {
-            //     ref place,
-            //     variant_index: _,
-            // } => {
-            //     // println!("Stmt: {:?}", stmt);
-            //     // self.mutate_place(
-            //     //     ContextKind::SetDiscrim.new(location),
-            //     //     (place, span),
-            //     //     Shallow(None),
-            //     //     JustWrite,
-            //     //     flow_state,
-            //     // );
-            // }
+    /// Given a projection base, recurse until local declaration is found 
+    /// (or return Err(()) if static found).
+    fn get_proj_local(
+        &mut self,
+        proj_base: &Place<'_>,
+    ) -> Result<Local,()> {
+        match &proj_base {
+            Place::Base(PlaceBase::Local(local)) => Ok(*local),
+            Place::Base(PlaceBase::Static(_stat)) => Err(()),
+            Place::Projection(next_proj) => self.get_proj_local(&next_proj.base),
         }
     }
 
@@ -2616,6 +2607,16 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
                     false
                 }
             },
+            TyKind::Tuple(list) => {
+                // TODO : This was something of a last second add... make sure it works.
+                for item in list.iter() {
+                    if self.is_ty_mut_ref(item) {
+                        return true
+                    }
+                }
+
+                false
+            }
             TyKind::Param(_param_ty) => {
                 // This will likely need its own handling, for now it returns false.
                 false
