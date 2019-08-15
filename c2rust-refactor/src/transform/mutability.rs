@@ -29,6 +29,8 @@ impl Transform for RemoveMutability {
         let tcx = cx.ty_ctxt();
 
         mut_visit_fns(krate, |fl| {
+            println!("Checking FL.Ident: {:?}", fl.ident.name);
+
             if fl.kind == FnKind::Foreign {
                 return;
             }

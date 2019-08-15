@@ -71,6 +71,9 @@ pub struct BorrowCheckResult<'gcx> {
     pub closure_requirements: Option<ClosureRegionRequirements<'gcx>>,
     pub used_mut_upvars: SmallVec<[Field; 8]>,
     pub used_mut: Vec<Local>,
+    pub used_mut_refs: FxHashSet<Local>,
+    pub may_used_refs: FxHashSet<Local>,
+    pub naa: NaiveAliasAnalysis,
 }
 
 pub fn mir_borrowck<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, def_id: DefId) -> BorrowCheckResult<'tcx> {
@@ -112,6 +115,9 @@ pub fn mir_borrowck<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, def_id: DefId) -> Bor
             closure_requirements: None,
             used_mut_upvars: SmallVec::<[Field; 8]>::new(),
             used_mut: Vec::new(),
+            used_mut_refs: Default::default(),
+            may_used_refs: Default::default(),
+            naa: NaiveAliasAnalysis::default(),
         };
     }
 
@@ -312,6 +318,13 @@ fn do_mir_borrowck<'a, 'gcx, 'tcx>(
         .collect();
     mbcx.gather_used_muts(temporary_used_locals, unused_mut_locals);
     
+
+    // Need to make a clone of the un-altered may_mut and used_mut_refs
+    // as the functions below are only for showing what needs to be changed
+    // in the warning lint.
+    let may_mut_ref_return = mbcx.may_mut_refs.clone();
+    let used_mut_ref_return = mbcx.used_mut_refs.clone();
+
     // Goes through all used_mut_refs and grabs their alias sets.
     // Alias sets are then added to the used_mut_refs to ensure 
     // types that need to remain mutable do.
@@ -341,7 +354,6 @@ fn do_mir_borrowck<'a, 'gcx, 'tcx>(
     // This prints out the currently assumed set of what can be 
     // changed from mutable references to just normal references 
     // (or mutable raw pointers to const raw pointers).
-
     let used_mut_refs = mbcx.used_mut_refs.clone();
     let mut local_ptr_set : FxHashSet<Local> = mbcx.mir.vars_iter()
         .filter_map(|local| {
@@ -470,6 +482,9 @@ fn do_mir_borrowck<'a, 'gcx, 'tcx>(
         closure_requirements: opt_closure_req,
         used_mut_upvars: mbcx.used_mut_upvars,
         used_mut: Vec::from_iter(used_mut.into_iter()),
+        used_mut_refs: used_mut_ref_return,
+        may_used_refs: may_mut_ref_return,
+        naa: mbcx.naa,
     };
 
     debug!("do_mir_borrowck: result = {:#?}", result);
@@ -2480,12 +2495,14 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
 
         match term.kind {
             TerminatorKind::Call {
-                func: _,
+                ref func,
                 ref args,
                 destination: _,
                 cleanup: _,
                 from_hir_call: _,
             } => {
+                println!("Func: {:?}", self.func_name(func));
+
                 // A function call leads to a situation where one of our locals
                 // MAY be used within the context of the function call, but 
                 // within the scope of each function there is no information regarding other 
@@ -2501,6 +2518,19 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
                 }
             }
             _ => { /* Pass over remaining types */ }
+        }
+    }
+
+    // TODO : Trying to find a way to connect may_use_refs to a function name for us in the mutability 
+    // pass later.
+    fn func_name(
+        &mut self,
+        operand: &Operand<'tcx>,
+    ) -> Option<ty::Const<'tcx>> {
+        if let Operand::Constant(con) = operand {
+            Some(*con.literal)
+        } else {
+            None
         }
     }
 
@@ -2625,7 +2655,7 @@ impl ContextKind {
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
-struct NaiveAliasAnalysis {
+pub struct NaiveAliasAnalysis {
     alias_sets: FxHashMap<Local, FxHashSet<Local>>,
     current_alias_map : FxHashMap<Local, Vec<Local>>,
 }
