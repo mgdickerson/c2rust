@@ -73,7 +73,7 @@ pub struct BorrowCheckResult<'gcx> {
     pub used_mut: Vec<Local>,
     pub used_mut_refs: FxHashSet<Local>,
     pub may_used_refs: FxHashSet<Local>,
-    pub naa: NaiveAliasAnalysis,
+    pub aa: AliasAnalysis,
 }
 
 pub fn mir_borrowck<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, def_id: DefId) -> BorrowCheckResult<'tcx> {
@@ -117,7 +117,7 @@ pub fn mir_borrowck<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, def_id: DefId) -> Bor
             used_mut: Vec::new(),
             used_mut_refs: Default::default(),
             may_used_refs: Default::default(),
-            naa: NaiveAliasAnalysis::default(),
+            aa: AliasAnalysis::default(),
         };
     }
 
@@ -135,7 +135,7 @@ fn do_mir_borrowck<'a, 'gcx, 'tcx>(
     input_mir: &Mir<'gcx>,
     def_id: DefId,
 ) -> BorrowCheckResult<'gcx> {
-    // println!("\n\ndo_mir_borrowck(def_id = {:?}", def_id);
+    println!("\n\ndo_mir_borrowck(def_id = {:?}", def_id);
     debug!("do_mir_borrowck(def_id = {:?})", def_id);
 
     let tcx = infcx.tcx;
@@ -262,7 +262,7 @@ fn do_mir_borrowck<'a, 'gcx, 'tcx>(
         may_mut_refs: Default::default(),
         borrow_set,
         dominators,
-        naa: NaiveAliasAnalysis::default(),
+        aa: AliasAnalysis::default(),
     };
 
     let mut state = Flows::new(
@@ -338,17 +338,22 @@ fn do_mir_borrowck<'a, 'gcx, 'tcx>(
 
     let used_mut_refs = mbcx.used_mut_refs.clone();
     for key in used_mut_refs.iter() {
-        if let Some(alias_key_set) = mbcx.naa.alias_keys(&key) {
-            for alias_key in alias_key_set.iter() {
-                if let Some(alias_set) = mbcx.naa.get_alias_set(&alias_key) {
-                    let local_set = alias_set.clone();
-
-                    for local in local_set.iter() {
-                        mbcx.used_mut_refs.insert(*local);
-                    }
-                }
+        if let Some(local_set) = mbcx.aa.get_alias_set(&key) {
+            for local in local_set.iter() {
+                mbcx.used_mut_refs.insert(*local);
             }
         }
+        // if let Some(alias_key_set) = mbcx.naa.alias_keys(&key) {
+        //     for alias_key in alias_key_set.iter() {
+        //         if let Some(alias_set) = mbcx.naa.get_alias_set(&alias_key) {
+        //             let local_set = alias_set.clone();
+
+        //             for local in local_set.iter() {
+        //                 mbcx.used_mut_refs.insert(*local);
+        //             }
+        //         }
+        //     }
+        // }
     }
     
     // This prints out the currently assumed set of what can be 
@@ -370,13 +375,15 @@ fn do_mir_borrowck<'a, 'gcx, 'tcx>(
         }
     });
 
-    // println!("NAA: {:?}", mbcx.naa);
+    println!("AA: {:?}", mbcx.aa);
+    println!("May_Use: {:?}", mbcx.may_mut_refs);
 
     for local in local_ptr_set.iter().filter(|local| !used_mut_refs.contains(local)) {
         // println!("unused local: {:?}", local);
         if let ClearCrossCrate::Set(ref vsi) = mbcx.mir().source_scope_local_data {
             let local_decl = &mbcx.mir.local_decls[*local];
             let span = local_decl.source_info.span;
+            println!("unused local: {:?} | Span: {:?}", local, span);
             let mut_span = tcx.sess.source_map().span_until_non_whitespace(span);
             tcx.struct_span_lint_hir(
                 UNUSED_MUT, 
@@ -484,7 +491,7 @@ fn do_mir_borrowck<'a, 'gcx, 'tcx>(
         used_mut: Vec::from_iter(used_mut.into_iter()),
         used_mut_refs: used_mut_ref_return,
         may_used_refs: may_mut_ref_return,
-        naa: mbcx.naa,
+        aa: mbcx.aa,
     };
 
     debug!("do_mir_borrowck: result = {:#?}", result);
@@ -600,7 +607,7 @@ pub struct MirBorrowckCtxt<'cx, 'gcx: 'tcx, 'tcx: 'cx> {
     /// NaiveAliasAnalysis tracks very simple aliasing of values to ensure 
     /// that aliased mutable references that are assigned to will add the 
     /// values they alias to the used_mut_refs set.
-    naa: NaiveAliasAnalysis,
+    aa: AliasAnalysis,
 }
 
 // Check that:
@@ -676,7 +683,7 @@ impl<'cx, 'gcx, 'tcx> DataflowResultsConsumer<'cx, 'tcx> for MirBorrowckCtxt<'cx
                 ref place,
                 variant_index: _,
             } => {
-                println!("Stmt: {:?}", stmt);
+                // println!("Stmt: {:?}", stmt);
                 self.mutate_place(
                     ContextKind::SetDiscrim.new(location),
                     (place, span),
@@ -2319,7 +2326,7 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
         _location: &Location,
         stmt: &Statement<'tcx>,
     ) {
-        // println!("Stmt: {:?}", stmt);
+        println!("Stmt: {:?}", stmt);
         // TODO : Tuples (and likely other types of aggregate data) lack an immediate ability to increase 
         //        granularity of analysis as they share the same local making it difficult to target a single
         //        local as not needing to be mutable.
@@ -2352,7 +2359,7 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
                                         Rvalue::Ref(_region, _borrow_kind, place) => {
                                             if let Some(rhs_local) = place.base_local() {
                                                 self.may_mut_refs.insert(rhs_local);
-                                                self.naa.add_alias(&lhs_local, &rhs_local)
+                                                self.aa.add_alias(&lhs_local, &rhs_local)
                                             }
                                         },
                                         Rvalue::Cast(_cast_kind, operand, ty) => {
@@ -2387,13 +2394,13 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
                                         Rvalue::Ref(_region, borrow_kind, place) => {
                                             if let BorrowKind::Mut{ allow_two_phase_borrow: _ } = borrow_kind {
                                                 if let Some(rhs_local) = place.base_local() {
-                                                    self.naa.add_alias(&lhs_local, &rhs_local);
+                                                    self.aa.add_alias(&lhs_local, &rhs_local);
                                                 }
                                             }
                                         },
                                         Rvalue::Use(op) => {
                                             if let Some(rhs_local) = MirBorrowckCtxt::op_local(&op) {
-                                                self.naa.add_alias(&lhs_local, &rhs_local);
+                                                self.aa.add_alias(&lhs_local, &rhs_local);
                                             }
                                         },
                                         Rvalue::Cast(_cast_kind, operand, ty) => {
@@ -2406,7 +2413,7 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
                                             if self.is_ty_mut_ref(ty) {
                                                 // Cast type is mutable, add local to the tracked list.
                                                 if let Some(rhs_local) = MirBorrowckCtxt::op_local(&operand) {
-                                                    self.naa.add_alias(&lhs_local, &rhs_local);
+                                                    self.aa.add_alias(&lhs_local, &rhs_local);
                                                 }
                                             }
                                         },
@@ -2416,6 +2423,14 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
                                             // to the set of used mutable references.
                                             self.used_mut_refs.insert(*lhs_local);
                                         },
+                                    }
+                                } else {
+                                    if let Rvalue::Aggregate(_aggr_kind, op_vec) = *rhs.clone() {
+                                        for operand in op_vec.iter() {
+                                            if let Some(rhs_local) = MirBorrowckCtxt::op_local(&operand) {
+                                                self.may_mut_refs.insert(rhs_local);
+                                            }
+                                        }
                                     }
                                 }
                             },
@@ -2459,8 +2474,44 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
                     // Simple tracking type, dereference assignment of mutable pointer type (ie: *var = value;)
                     Place::Projection(proj) => {
                         // Currently elem is not used for any level of distinction.
-                        if let Ok(local) = self.get_proj_local(&proj.base) {
-                            self.used_mut_refs.insert(local);
+                        if let Ok(lhs_local) = self.get_proj_local(&proj.base) {
+                            match *rhs.clone() {
+                                Rvalue::Ref(_, _, place) => {
+                                    if let Some(rhs_local) = place.base_local() {
+                                        if self.is_ty_mut_ref(self.mir.local_decls[rhs_local].ty) {
+                                            self.used_mut_refs.insert(rhs_local);
+                                        }
+                                    }
+                                },
+                                Rvalue::Use(operand) => {
+                                    if let Some(rhs_local) = MirBorrowckCtxt::op_local(&operand) {
+                                        self.used_mut_refs.insert(rhs_local);
+                                    }
+                                },
+                                Rvalue::Cast(_cast_kind, operand, ty) => {
+                                    if self.is_ty_mut_ref(ty) {
+                                        if let Some(rhs_local) = MirBorrowckCtxt::op_local(&operand) {
+                                            self.used_mut_refs.insert(rhs_local);
+                                        }
+                                    }
+                                },
+                                Rvalue::Repeat(operand, _rep) => {
+                                    if let Some(rhs_local) = MirBorrowckCtxt::op_local(&operand) {
+                                        self.used_mut_refs.insert(rhs_local);
+                                    }
+                                },
+                                Rvalue::Aggregate(_aggr_kind, op_vec) => {
+                                    for operand in op_vec.iter() {
+                                        if let Some(rhs_local) = MirBorrowckCtxt::op_local(&operand) {
+                                            self.used_mut_refs.insert(rhs_local);
+                                        }
+                                    }
+                                },
+                                _ => { /* Does not assign mutable pointer to projection type */ },
+                            }
+
+                            // Add use to lhs_local projection type. Very coarse tracking on this.
+                            self.used_mut_refs.insert(lhs_local);
                         }
                     },
                 }
@@ -2487,7 +2538,7 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
         location: &Location,
         term: &Terminator<'tcx>,
     ) {
-        // println!("MirBorrockCtxt::check_terminator({:?}, {:?})", location, term);
+        println!("MirBorrockCtxt::check_terminator({:?}, {:?})", location, term);
         debug!(
             "MirBorrowckCtxt::process_terminator({:?}, {:?})",
             location, term
@@ -2495,13 +2546,13 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
 
         match term.kind {
             TerminatorKind::Call {
-                ref func,
+                func: _,
                 ref args,
                 destination: _,
                 cleanup: _,
                 from_hir_call: _,
             } => {
-                println!("Func: {:?}", self.func_name(func));
+                // println!("Func: {:?}", self.func_name(func));
 
                 // A function call leads to a situation where one of our locals
                 // MAY be used within the context of the function call, but 
@@ -2523,16 +2574,16 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
 
     // TODO : Trying to find a way to connect may_use_refs to a function name for us in the mutability 
     // pass later.
-    fn func_name(
-        &mut self,
-        operand: &Operand<'tcx>,
-    ) -> Option<ty::Const<'tcx>> {
-        if let Operand::Constant(con) = operand {
-            Some(*con.literal)
-        } else {
-            None
-        }
-    }
+    // fn func_name(
+    //     &mut self,
+    //     operand: &Operand<'tcx>,
+    // ) -> Option<ty::Const<'tcx>> {
+    //     if let Operand::Constant(con) = operand {
+    //         Some(*con.literal)
+    //     } else {
+    //         None
+    //     }
+    // }
 
     /// Returns true if it is a mutable reference type.
     fn is_ty_mut_ref(
@@ -2698,14 +2749,17 @@ impl NaiveAliasAnalysis {
                 }
             }
         } else {
-            // local is not currently an alias for any value,
-            // create alias_set for it, then add alias and base_local 
-            // to current_alias_map.
-            let mut alias_set = HashSet::default();
-            alias_set.insert(*local);
-            alias_set.insert(*new_alias);
+            // If the alias set already exists, simply add to that alias set.
+            if let Some(alias_set) = self.alias_sets.get_mut(local) {
+                alias_set.insert(*new_alias);
+            } else {
+                let mut alias_set = HashSet::default();
+                alias_set.insert(*local);
+                alias_set.insert(*new_alias);
 
-            self.alias_sets.insert(*local, alias_set);
+                self.alias_sets.insert(*local, alias_set);
+            }
+            
             self.current_alias_map.insert(*new_alias, vec![*local]);
         }
     }
@@ -2725,5 +2779,114 @@ impl NaiveAliasAnalysis {
         key: &Local,
     ) -> Option<&FxHashSet<Local>> {
         return self.alias_sets.get(key)
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct AliasAnalysis {
+    current_alias_map: FxHashMap<Local, Alias>,
+}
+
+impl AliasAnalysis {
+    fn add_alias(
+        &mut self,
+        new_alias_local: &Local,
+        parent_local: &Local,
+    ) {
+        let parent_node;
+        if let Some(parent_alias) = self.current_alias_map.get(parent_local) {
+            parent_node = AliasNode::Alias(parent_alias.clone());
+        } else {
+            parent_node = AliasNode::Root(*parent_local);
+        }
+
+        // First check to see if alias already exists
+        if let Some(alias) = self.current_alias_map.get_mut(new_alias_local) {
+            // Alias already exists, add to list of parent paths
+            alias.add_parent(parent_node);
+            return
+        }
+
+        // Alias does not already exist, create alias
+        let new_alias = Alias::new(*new_alias_local, parent_node);
+                
+        self.current_alias_map.insert(*new_alias_local, new_alias);
+    }
+
+    fn get_alias_set(
+        &self,
+        key: &Local,
+    ) -> Option<FxHashSet<Local>> {
+        if let Some(alias) = self.current_alias_map.get(key) {
+            let mut hashset = HashSet::default();
+            alias.collect(&mut hashset);
+            return Some(hashset);
+        }
+
+        None
+    }
+}
+
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Alias {
+    parents: Vec<AliasNode>,
+    alias: Local,
+}
+
+impl Alias {
+    pub fn new(alias: Local, parent: AliasNode) -> Self {
+        let mut new_vec = Vec::new();
+        new_vec.push(parent);
+        Alias {
+            parents: new_vec,
+            alias,
+        }
+    }
+
+    pub fn add_parent(&mut self, parent: AliasNode) {
+        self.parents.push(parent);
+    }
+
+    pub fn collect(&self, collection: &mut FxHashSet<Local>) {
+        collection.insert(self.alias);
+        for alias_node in self.parents.iter() {
+            match alias_node {
+                AliasNode::Alias(alias) => alias.collect(collection),
+                AliasNode::Root(root) => { collection.insert(*root); },
+            }
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum AliasNode {
+    Root(Local),
+    Alias(Alias),
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct AliasSet {
+    root: Local,
+    alias_set: FxHashSet<Local>,
+}
+
+impl AliasSet {
+    pub fn new(root: Local) -> Self {
+        let mut alias_set = HashSet::default();
+        alias_set.insert(root.clone());
+
+        AliasSet {
+            root,
+            alias_set, 
+        }
+    }
+
+    pub fn insert(&mut self, local: Local) {
+        self.alias_set.insert(local);
+    }
+
+    pub fn get(&self) -> FxHashSet<Local> {
+        self.alias_set.clone()
     }
 }
