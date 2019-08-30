@@ -135,7 +135,7 @@ fn do_mir_borrowck<'a, 'gcx, 'tcx>(
     input_mir: &Mir<'gcx>,
     def_id: DefId,
 ) -> BorrowCheckResult<'gcx> {
-    println!("\n\ndo_mir_borrowck(def_id = {:?}", def_id);
+    // println!("\n\ndo_mir_borrowck(def_id = {:?}", def_id);
     debug!("do_mir_borrowck(def_id = {:?})", def_id);
 
     let tcx = infcx.tcx;
@@ -375,15 +375,15 @@ fn do_mir_borrowck<'a, 'gcx, 'tcx>(
         }
     });
 
-    println!("AA: {:?}", mbcx.aa);
-    println!("May_Use: {:?}", mbcx.may_mut_refs);
+    // println!("AA: {:?}", mbcx.aa);
+    // println!("May_Use: {:?}", mbcx.may_mut_refs);
 
     for local in local_ptr_set.iter().filter(|local| !used_mut_refs.contains(local)) {
         // println!("unused local: {:?}", local);
         if let ClearCrossCrate::Set(ref vsi) = mbcx.mir().source_scope_local_data {
             let local_decl = &mbcx.mir.local_decls[*local];
             let span = local_decl.source_info.span;
-            println!("unused local: {:?} | Span: {:?}", local, span);
+            // println!("unused local: {:?} | Span: {:?}", local, span);
             let mut_span = tcx.sess.source_map().span_until_non_whitespace(span);
             tcx.struct_span_lint_hir(
                 UNUSED_MUT, 
@@ -599,10 +599,6 @@ pub struct MirBorrowckCtxt<'cx, 'gcx: 'tcx, 'tcx: 'cx> {
 
     /// Dominators for MIR
     dominators: Dominators<BasicBlock>,
-
-    // Test Addition
-    //test: i32,    // test successful, only one place needs changing
-    // TODO : Add structure for tracking mutable pointers
 
     /// NaiveAliasAnalysis tracks very simple aliasing of values to ensure 
     /// that aliased mutable references that are assigned to will add the 
@@ -2326,12 +2322,7 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
         _location: &Location,
         stmt: &Statement<'tcx>,
     ) {
-        println!("Stmt: {:?}", stmt);
-        // TODO : Tuples (and likely other types of aggregate data) lack an immediate ability to increase 
-        //        granularity of analysis as they share the same local making it difficult to target a single
-        //        local as not needing to be mutable.
-        // TODO : Arrays types are now checked, though not if a non-mutable reference of them is passed.
-        //        (ie: arr: & [&mut; n]; where arr is not used mutably will not be tracked as unnecessary mutability).
+        // println!("Stmt: {:?}", stmt);
         match stmt.kind {
             StatementKind::Assign(ref lhs, ref rhs) => {
                 match lhs {
@@ -2538,7 +2529,7 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
         location: &Location,
         term: &Terminator<'tcx>,
     ) {
-        println!("MirBorrockCtxt::check_terminator({:?}, {:?})", location, term);
+        // println!("MirBorrockCtxt::check_terminator({:?}, {:?})", location, term);
         debug!(
             "MirBorrowckCtxt::process_terminator({:?}, {:?})",
             location, term
