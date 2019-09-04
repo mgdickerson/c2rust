@@ -196,8 +196,11 @@ impl Transform for RemoveMutability {
             })
         });
 
-        // println!("{}", call_graph);
+        println!("{}", call_graph);
         // println!("# of roots: {}", call_graph.roots.len());
+        for root in call_graph.get_roots() {
+            println!("{:?}", call_graph.into_iter(root, TraversalType::PostOrder));
+        }
     }
 
     fn min_phase(&self) -> Phase {
@@ -268,9 +271,128 @@ impl CallGraph {
         }
     }
 
+    fn get_roots(&self) -> Vec<NodeTag> {
+        self.roots.clone()
+    }
+
     fn mark_analyzed(&mut self, def_id: DefId) {
         if let Some(node) = self.graph_nodes.get_mut(&NodeTag(def_id)) {
             node.mark_analyzed();
+        }
+    }
+
+    // Collect all node_tags that are in this working tree based on input root
+    // fn working_tree(&self, root: NodeTag) -> Vec<NodeTag> {
+    //     let mut visited = Vec::new();
+
+    //     let mut working_group = Vec::new();
+    //     working_group.push(root);
+
+    //     while let Some(node_tag) = working_group.pop() {
+    //         // Add to the visited list
+    //         visited.push(node_tag);
+
+    //         for child_tag in self.graph_nodes.get(&node_tag)
+    //             .expect("Added node to working group that is not in graph.")
+    //             .children() {
+    //                 if !visited.contains(child_tag) {
+    //                     working_group.push(*child_tag);
+    //                 }
+    //             }
+    //     }
+
+    //     visited
+    // }
+
+    fn into_iter(&self, root: NodeTag, traversal_type: TraversalType) -> std::vec::IntoIter<NodeTag> {
+        // First thing required is limiting the nodes to only those involved in the root tree.
+        // We will do this by building another graph with only the required nodes.
+        let mut traversal_path = Vec::new();
+        let mut visited = Vec::new();
+        let mut has_cycle = false;
+
+        self.recurse_graph(
+            root, 
+            Vec::new(), 
+            &mut visited,
+            &mut traversal_path, 
+            traversal_type,
+            &mut has_cycle);
+
+        if has_cycle {
+            println!("Root: {:?} has cycle!", root);
+        }
+
+        traversal_path.into_iter()
+    }
+
+    fn recurse_graph(
+        &self, 
+        current_node: NodeTag, 
+        mut call_stack: Vec<NodeTag>, 
+        visited: &mut Vec<NodeTag>,
+        tp: &mut Vec<NodeTag>, 
+        travesal_type: TraversalType, 
+        has_cycle: &mut bool
+    ) {
+        if !visited.contains(&current_node) {
+            visited.push(current_node);
+        }
+
+        if !call_stack.contains(&current_node) {
+            call_stack.push(current_node);
+        }
+    
+        match travesal_type {
+            TraversalType::DFS => {
+                if !tp.contains(&current_node) {
+                    tp.push(current_node);
+                }
+
+                if let Some(node) = self.graph_nodes.get(&current_node) {
+                    for child_tag in node.children() {
+                        if call_stack.contains(&child_tag) {
+                            *has_cycle = true;
+                        }
+         
+                        if !visited.contains(&child_tag) {
+                            self.recurse_graph(
+                                *child_tag,
+                                call_stack.clone(),
+                                visited,
+                                tp,
+                                travesal_type,
+                                has_cycle,
+                            );
+                        }
+                    }
+                }
+            },
+            TraversalType::PostOrder => {
+                // TODO : Infinite loop problem, need to separate the visted logic from travelpath(tp)
+                if let Some(node) = self.graph_nodes.get(&current_node) {
+                    for child_tag in node.children() {
+                        if call_stack.contains(&child_tag) {
+                            *has_cycle = true;
+                        }
+                        
+                        if !visited.contains(&child_tag) {
+                            self.recurse_graph(
+                                *child_tag,
+                                call_stack.clone(),
+                                visited,
+                                tp,
+                                travesal_type,
+                                has_cycle,
+                            );
+                        }
+                    }
+                }
+
+                if !tp.contains(&current_node) {
+                    tp.push(current_node);
+                }
+            },
         }
     }
 }
@@ -327,6 +449,14 @@ impl Node {
 
     fn mark_analyzed(&mut self) {
         self.analyzed = true;
+    }
+
+    fn children(&self) -> &Vec<NodeTag> {
+        &self.succ
+    }
+
+    fn parents(&self) -> &Vec<NodeTag> {
+        &self.pred
     }
 }
 
@@ -385,4 +515,10 @@ fn sort_user_locals(mir: &Mir) -> BTreeMap<SpanData, Local> {
     }
 
     result
+}
+
+#[derive(Clone, Copy)]
+enum TraversalType {
+    DFS,
+    PostOrder,
 }
