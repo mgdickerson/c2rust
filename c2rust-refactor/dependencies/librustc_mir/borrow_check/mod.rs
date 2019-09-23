@@ -72,7 +72,7 @@ pub struct BorrowCheckResult<'gcx> {
     pub used_mut_upvars: SmallVec<[Field; 8]>,
     pub used_mut: Vec<Local>,
     pub used_mut_refs: FxHashSet<Local>,
-    pub may_used_refs: FxHashSet<Local>,
+    pub may_use_refs: FxHashSet<Local>,
     pub aa: AliasAnalysis,
 }
 
@@ -116,7 +116,7 @@ pub fn mir_borrowck<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, def_id: DefId) -> Bor
             used_mut_upvars: SmallVec::<[Field; 8]>::new(),
             used_mut: Vec::new(),
             used_mut_refs: Default::default(),
-            may_used_refs: Default::default(),
+            may_use_refs: Default::default(),
             aa: AliasAnalysis::default(),
         };
     }
@@ -317,49 +317,43 @@ fn do_mir_borrowck<'a, 'gcx, 'tcx>(
         .filter(|local| !mbcx.used_mut.contains(local))
         .collect();
     mbcx.gather_used_muts(temporary_used_locals, unused_mut_locals);
-    
 
-    // Need to make a clone of the un-altered may_mut and used_mut_refs
-    // as the functions below are only for showing what needs to be changed
-    // in the warning lint.
-    let may_mut_ref_return = mbcx.may_mut_refs.clone();
-    let used_mut_ref_return = mbcx.used_mut_refs.clone();
 
-    // Goes through all used_mut_refs and grabs their alias sets.
-    // Alias sets are then added to the used_mut_refs to ensure 
-    // types that need to remain mutable do.
-    let may_mut_refs = mbcx.may_mut_refs.clone();
-    may_mut_refs.iter().for_each(|&local| {
-        // These are all locals that have been called by a function and thus 
-        // may be used mutably. Thus we initially add them to the used set 
-        // and make a separate warning for these values.
-        mbcx.used_mut_refs.insert(local);
-    });
-
-    let used_mut_refs = mbcx.used_mut_refs.clone();
-    for key in used_mut_refs.iter() {
+    // First grab and add alias sets for both may_mut and used_mut
+    for key in mbcx.used_mut_refs.clone().iter() {
         if let Some(local_set) = mbcx.aa.get_alias_set(&key) {
             for local in local_set.iter() {
                 mbcx.used_mut_refs.insert(*local);
             }
         }
-        // if let Some(alias_key_set) = mbcx.naa.alias_keys(&key) {
-        //     for alias_key in alias_key_set.iter() {
-        //         if let Some(alias_set) = mbcx.naa.get_alias_set(&alias_key) {
-        //             let local_set = alias_set.clone();
-
-        //             for local in local_set.iter() {
-        //                 mbcx.used_mut_refs.insert(*local);
-        //             }
-        //         }
-        //     }
-        // }
     }
+
+    let mut lint_mmr = mbcx.may_mut_refs.clone();
+
+    for key in mbcx.may_mut_refs.clone().iter() {
+        // If a may_mut_ref is already in the list of used_mut_refs, remove it from may_mut list
+        if mbcx.used_mut_refs.contains(&key) {
+            mbcx.may_mut_refs.remove(key);
+            continue;
+        }
+
+        // Add alias sets to the lint_mmr for accurate repotring.
+        if let Some(may_mut_set) = mbcx.aa.get_alias_set(&key) {
+            for local in may_mut_set.iter() {
+                if !mbcx.used_mut_refs.contains(&local) {
+                    lint_mmr.insert(*local);
+                }
+            }
+        }
+    }
+
+    // Makes new used_mut_refs collection for linting.
+    let mut lint_umr = mbcx.used_mut_refs.clone();
+
+    lint_mmr.iter().for_each(|&local| {
+        lint_umr.insert(local);
+    });
     
-    // This prints out the currently assumed set of what can be 
-    // changed from mutable references to just normal references 
-    // (or mutable raw pointers to const raw pointers).
-    let used_mut_refs = mbcx.used_mut_refs.clone();
     let mut local_ptr_set : FxHashSet<Local> = mbcx.mir.vars_iter()
         .filter_map(|local| {
             if mbcx.is_ty_mut_ref(mbcx.mir.local_decls[local].ty) {
@@ -378,7 +372,10 @@ fn do_mir_borrowck<'a, 'gcx, 'tcx>(
     // println!("AA: {:?}", mbcx.aa);
     // println!("May_Use: {:?}", mbcx.may_mut_refs);
 
-    for local in local_ptr_set.iter().filter(|local| !used_mut_refs.contains(local)) {
+    // This prints out the currently assumed set of what can be 
+    // changed from mutable references to just normal references 
+    // (or mutable raw pointers to const raw pointers).
+    for local in local_ptr_set.iter().filter(|local| !lint_umr.contains(local)) {
         // println!("unused local: {:?}", local);
         if let ClearCrossCrate::Set(ref vsi) = mbcx.mir().source_scope_local_data {
             let local_decl = &mbcx.mir.local_decls[*local];
@@ -401,7 +398,7 @@ fn do_mir_borrowck<'a, 'gcx, 'tcx>(
         }
     }
 
-    // TODO : Separate warning generation for potentially used mutable ptrs.
+    // println!("mbcx.used_mut_refs: {:?}", mbcx.used_mut_refs);
 
     debug!("mbcx.used_mut: {:?}", mbcx.used_mut);
     let used_mut = mbcx.used_mut;
@@ -485,12 +482,13 @@ fn do_mir_borrowck<'a, 'gcx, 'tcx>(
         }
     }
 
+    // TODO : This should be a more accurate representation of the used_muts and may_use_muts
     let result = BorrowCheckResult {
         closure_requirements: opt_closure_req,
         used_mut_upvars: mbcx.used_mut_upvars,
         used_mut: Vec::from_iter(used_mut.into_iter()),
-        used_mut_refs: used_mut_ref_return,
-        may_used_refs: may_mut_ref_return,
+        used_mut_refs: mbcx.used_mut_refs,
+        may_use_refs: mbcx.may_mut_refs,
         aa: mbcx.aa,
     };
 
@@ -2537,23 +2535,38 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
 
         match term.kind {
             TerminatorKind::Call {
-                func: _,
+                ref func,
                 ref args,
                 destination: _,
                 cleanup: _,
                 from_hir_call: _,
             } => {
-                // println!("Func: {:?}", self.func_name(func));
-
                 // A function call leads to a situation where one of our locals
                 // MAY be used within the context of the function call, but 
                 // within the scope of each function there is no information regarding other 
                 // functions (that I have found yet anyway) and so all locals that may 
                 // possibly be mutated will be added to the maybe_used_mut_ref list.
-                for arg in args.iter() {
+                for (arg_id, arg) in args.iter().enumerate() {
                     if let Some(local) = MirBorrowckCtxt::op_local(arg) {
                         let local_decl = self.mir.local_decls[local].clone();
                         if self.is_ty_mut_ref(local_decl.ty) {
+
+                            // FIXME : I think this might have to be done on the HIR level.
+
+                            if let Operand::Constant(con) = func {
+                                if let TyKind::FnDef(callee_id, _) = con.ty.sty {
+                                    let param_id = Local::from_usize(arg_id + 1);
+                                    // println!("callee_id: {:?}", callee_id);
+                                    let callee_mir = self.infcx.tcx.mir_validated(callee_id);
+                                    
+                                    // if self.is_ty_mut_ref(callee_mir.local_decls[param_id].ty) {
+                                    //     self.may_mut_refs.insert(local);
+                                    // }
+                                }
+                            } else {
+                                
+                            }
+
                             self.may_mut_refs.insert(local);
                         }
                     }
@@ -2562,19 +2575,6 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
             _ => { /* Pass over remaining types */ }
         }
     }
-
-    // TODO : Trying to find a way to connect may_use_refs to a function name for us in the mutability 
-    // pass later.
-    // fn func_name(
-    //     &mut self,
-    //     operand: &Operand<'tcx>,
-    // ) -> Option<ty::Const<'tcx>> {
-    //     if let Operand::Constant(con) = operand {
-    //         Some(*con.literal)
-    //     } else {
-    //         None
-    //     }
-    // }
 
     /// Returns true if it is a mutable reference type.
     fn is_ty_mut_ref(
@@ -2696,82 +2696,7 @@ impl ContextKind {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Debug, Default)]
-pub struct NaiveAliasAnalysis {
-    alias_sets: FxHashMap<Local, FxHashSet<Local>>,
-    current_alias_map : FxHashMap<Local, Vec<Local>>,
-}
-
-impl NaiveAliasAnalysis {
-    /// Adds alias values to the NAA structure. 
-    /// Checks first to see if 'old_alias' value 
-    /// has a key in current_alias_map, otherwise 
-    /// this is a base value that does not alias 
-    /// any other value: 
-    /// ```rust
-    /// let x : i32 = 0;
-    /// let y = x;  // x is base value, y is alias of x.
-    /// ``` 
-    fn add_alias(
-        &mut self,
-        new_alias: &Local,
-        local: &Local,
-    ) {
-        // First check if local is already an alias
-        if let Some(base_vec) = self.current_alias_map.get(local) {
-            let local_vec = base_vec.clone();
-
-            for local in local_vec.iter() {
-                let base_local = local.clone();
-
-                // local is an alias for base_local
-                if let Some(alias_set) = self.alias_sets.get_mut(&base_local) {
-                    // add new alias to alias set.
-                    alias_set.insert(new_alias.clone());
-                }
-
-                // Helps avoid borrow problems.
-                let local_base = base_local;
-
-                if let Some(base_vec) = self.current_alias_map.get_mut(new_alias) {
-                    base_vec.push(local_base);
-                } else {
-                    self.current_alias_map.insert(new_alias.clone(), vec![local_base]);
-                }
-            }
-        } else {
-            // If the alias set already exists, simply add to that alias set.
-            if let Some(alias_set) = self.alias_sets.get_mut(local) {
-                alias_set.insert(*new_alias);
-            } else {
-                let mut alias_set = HashSet::default();
-                alias_set.insert(*local);
-                alias_set.insert(*new_alias);
-
-                self.alias_sets.insert(*local, alias_set);
-            }
-            
-            self.current_alias_map.insert(*new_alias, vec![*local]);
-        }
-    }
-
-    fn alias_keys(
-        &self,
-        key: &Local,
-    ) -> Option<Vec<Local>> {
-        if let Some(alias_key_set) = self.current_alias_map.get(key) {
-            return Some(alias_key_set.clone())
-        }
-        None
-    }
-
-    fn get_alias_set(
-        &self, 
-        key: &Local,
-    ) -> Option<&FxHashSet<Local>> {
-        return self.alias_sets.get(key)
-    }
-}
+// TODO : I dont know why, but this seems to work despite not looking past any last mutable use of some local...
 
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct AliasAnalysis {
@@ -2804,7 +2729,7 @@ impl AliasAnalysis {
         self.current_alias_map.insert(*new_alias_local, new_alias);
     }
 
-    fn get_alias_set(
+    pub fn get_alias_set(
         &self,
         key: &Local,
     ) -> Option<FxHashSet<Local>> {

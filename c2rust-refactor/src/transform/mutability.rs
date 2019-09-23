@@ -16,6 +16,13 @@ use syntax::ast::{BindingMode, Crate, Pat, PatKind, Stmt};
 use syntax::ptr::P;
 use syntax::source_map::SpanData;
 
+// TODO : Temp includes for linting
+use rustc::lint::builtin::UNUSED_MUT;
+use rustc::mir::ClearCrossCrate;
+use rustc_errors::{Applicability};
+// TODO : End previous TODO
+
+
 use std::fmt::{self, Display, Formatter};
 
 use crate::ast_manip::fn_edit::{mut_visit_fns, FnKind};
@@ -37,11 +44,12 @@ impl Transform for RemoveMutability {
     fn transform(&self, krate: &mut Crate, _st: &CommandState, cx: &RefactorCtxt) {
         let tcx = cx.ty_ctxt();
         let mut call_ctxt_collection = Vec::new();
+        let mut fl_collection = HashMap::new();
 
         mut_visit_fns(krate, |fl| {
             if fl.kind == FnKind::Foreign {
                 let def_id = cx.node_def_id(fl.id);
-                call_ctxt_collection.push(CallCtxt { def_id, calls: Vec::new() });
+                call_ctxt_collection.push(CallCtxt { def_id, calls: Vec::new(), passed_locals: HashMap::new() });
 
                 // TODO : Specific handling required for foreign functions so that they appear in call 
                 // graph but dont throw an error by trying to walk them.
@@ -53,8 +61,10 @@ impl Transform for RemoveMutability {
             let mir: &Mir<'_> = &input_mir.borrow();
 
             // println!("def_id: {:?}", def_id);
+            fl_collection.insert(def_id, fl.clone());
 
             let mut call_vec = Vec::new();
+            let mut locals_called : HashMap<Local, (DefId, Local)> = HashMap::new();
 
             for (bb, _) in traversal::reverse_postorder(&mir) {
                 let BasicBlockData { statements: _, ref terminator, is_cleanup: _ } = mir[bb];
@@ -69,7 +79,6 @@ impl Transform for RemoveMutability {
                     } = term.kind {
                         // println!("func: {:?} | args: {:?}", func, args);
 
-                        // This is literally all I needed.
                         if let Operand::Constant(con) = func {
                             if let TyKind::FnDef(callee_id, _) = con.ty.sty {
                                 // println!("called def_id: {:?}", callee_id);
@@ -82,6 +91,7 @@ impl Transform for RemoveMutability {
                                         Operand::Move(place) | Operand::Copy(place) => {
                                             if let Some(local) = place.base_local() {
                                                 hash_map.insert(param_id, local);
+                                                locals_called.insert(local, (callee_id,param_id));
                                             }
                                         },
                                         Operand::Constant(_con) => { /* Do Nothing */ },
@@ -95,12 +105,12 @@ impl Transform for RemoveMutability {
                 }
             }
 
-            call_ctxt_collection.push(CallCtxt { def_id, calls: call_vec });
+            call_ctxt_collection.push(CallCtxt { def_id, calls: call_vec, passed_locals: locals_called });
         });
 
         // println!("call_ctxt_collection: {:?}", call_ctxt_collection);
         let mut call_graph = CallGraph::build_graph(call_ctxt_collection);
-        
+        let mut func_results = HashMap::new();
 
         mut_visit_fns(krate, |fl| {
             // println!("Checking FL.Ident: {:?}", fl.ident.name);
@@ -115,6 +125,7 @@ impl Transform for RemoveMutability {
             let borrow_check_result = mir_borrowck(tcx, def_id);
 
             call_graph.mark_analyzed(def_id);
+            func_results.insert(def_id, borrow_check_result.clone());
 
             let used_mut_user_locals: HashSet<Local> =
                 HashSet::from_iter(borrow_check_result.used_mut.iter().cloned());
@@ -196,10 +207,119 @@ impl Transform for RemoveMutability {
             })
         });
 
-        println!("{}", call_graph);
+        // println!("{}", call_graph);
         // println!("# of roots: {}", call_graph.roots.len());
         for root in call_graph.get_roots() {
-            println!("{:?}", call_graph.into_iter(root, TraversalType::PostOrder));
+            let analysis_path = call_graph.into_iter(root, TraversalType::PostOrder);
+            // println!("{:?}", call_graph.into_iter(root, TraversalType::PostOrder));
+
+            for node_tag in analysis_path {
+                if let Some(node) = call_graph.get_node(node_tag) {
+                    if !node.analyzed() {
+                        continue;
+                    }
+
+                    if let Some(current_node_analysis) = func_results.get(&node_tag.0) {
+                        if current_node_analysis.may_use_refs.is_empty() {
+                            // No need for further analysis if the current function is
+                            // determined to not have any cases of may_mut
+                            continue;
+                        }
+                        
+                        // Make local copy of cna that can be mutated and eventually replace/update old cna
+                        let mut cna = current_node_analysis.clone();
+                        
+                        for caller_may_mut in cna.may_use_refs.clone().iter() {
+                            if let Some((callee_id, callee_param_pos)) = node.get_call_id(*caller_may_mut) {
+                                // Check to make sure called function has been analyzed
+                                if let Some(callee_node) = call_graph.get_node(NodeTag(*callee_id)) {
+                                    if !callee_node.analyzed() {
+                                        // Callee function has not been analyzed, thus we must assume pointer is used mutably.
+                                        if let Some(caller_alias_set) = cna.aa.get_alias_set(caller_may_mut) {
+                                            // may_mut has alias' that need to be added to used_mut_refs
+                                            for caller_alias_local in caller_alias_set.iter() {
+                                                cna.may_use_refs.remove(caller_alias_local);
+                                                cna.used_mut_refs.insert(*caller_alias_local);
+                                            }
+                                        }
+
+                                        cna.may_use_refs.remove(caller_may_mut);
+                                        cna.used_mut_refs.insert(*caller_may_mut);
+                                        continue;
+                                    }
+
+                                    // Callee function has been analyzed, get function analysis results.
+                                    if let Some(callee_results) = func_results.get(callee_id) {
+                                        if callee_results.may_use_refs.contains(callee_param_pos) {
+                                            // TODO : This is likely a cyclic case.
+                                            println!("Found caller: {:?} in callee's may_use_refs set: {:?}.", caller_may_mut, callee_param_pos);
+                                            continue;
+                                        }
+
+                                        if !callee_results.used_mut_refs.contains(callee_param_pos) {
+                                            // caller_may_mut not contained in callee may_use_refs or used_mut_refs
+                                            // Check to see if may_use_ref has alias' and add any not used mutably to alias set
+                                            if let Some(caller_alias_set) = cna.aa.get_alias_set(caller_may_mut) {
+                                                for caller_alias_local in caller_alias_set.iter() {
+                                                    if !cna.used_mut_refs.contains(caller_alias_local) {
+                                                        cna.may_use_refs.insert(*caller_alias_local);
+                                                    }
+                                                }
+                                            }
+
+                                            continue;
+                                        }
+                                    }
+                                }
+                            }
+
+                            // If no continue branch is hit, it means may_mut is either used mutably or could not be 
+                            // analyzed, and in either case should be removed from may_use_refs and added to used_mut_refs
+                            if let Some(caller_alias_set) = cna.aa.get_alias_set(caller_may_mut) {
+                                // may_mut has alias' that need to be added to used_mut_refs
+                                for caller_alias_local in caller_alias_set.iter() {
+                                    cna.may_use_refs.remove(caller_alias_local);
+                                    cna.used_mut_refs.insert(*caller_alias_local);
+                                }
+                            }
+
+                            cna.may_use_refs.remove(caller_may_mut);
+                            cna.used_mut_refs.insert(*caller_may_mut);
+                        }
+
+                        // With altered state of cna, print out still present may_use_refs
+                        let mir = tcx.mir_validated(node_tag.0).borrow();
+
+                        for local in cna.may_use_refs.iter() {
+                            if let ClearCrossCrate::Set(ref vsi) = mir.source_scope_local_data {
+                                let local_decl = &mir.local_decls[*local];
+                                let span = local_decl.source_info.span;
+
+                                let mut_span = tcx.sess.source_map().span_until_non_whitespace(span);
+                                tcx.struct_span_lint_hir(
+                                    UNUSED_MUT,
+                                    vsi[local_decl.source_info.scope].lint_root,
+                                    span,
+                                    "not used mutably!",
+                                )
+                                    .span_suggestion_short(
+                                        mut_span,
+                                        "passed type does not need to be mutable.",
+                                        String::new(),
+                                        Applicability::MachineApplicable,
+                                    )
+                                    .emit();
+                            }
+                        }
+
+                        // Update old func results with new func results.
+                        func_results.insert(node_tag.0, cna);
+
+                        // TODO : One thing that might increase the number of items found would be to remove the 
+                        // set of passed variables that are passed to non-mut parameter positions.
+                    }
+                }
+            }
         }
     }
 
@@ -223,6 +343,7 @@ impl CallGraph {
                 Node {
                     tag: NodeTag(call_ctxt.def_id),
                     data: call_ctxt.clone(),
+                    passed_locals: call_ctxt.passed_locals.clone(),
                     analyzed: false,
                     pred: Vec::new(),
                     succ: call_ctxt.successors(),
@@ -271,6 +392,10 @@ impl CallGraph {
         }
     }
 
+    fn get_node(&self, node_tag: NodeTag) -> Option<&Node> {
+        self.graph_nodes.get(&node_tag)
+    }
+
     fn get_roots(&self) -> Vec<NodeTag> {
         self.roots.clone()
     }
@@ -281,32 +406,7 @@ impl CallGraph {
         }
     }
 
-    // Collect all node_tags that are in this working tree based on input root
-    // fn working_tree(&self, root: NodeTag) -> Vec<NodeTag> {
-    //     let mut visited = Vec::new();
-
-    //     let mut working_group = Vec::new();
-    //     working_group.push(root);
-
-    //     while let Some(node_tag) = working_group.pop() {
-    //         // Add to the visited list
-    //         visited.push(node_tag);
-
-    //         for child_tag in self.graph_nodes.get(&node_tag)
-    //             .expect("Added node to working group that is not in graph.")
-    //             .children() {
-    //                 if !visited.contains(child_tag) {
-    //                     working_group.push(*child_tag);
-    //                 }
-    //             }
-    //     }
-
-    //     visited
-    // }
-
     fn into_iter(&self, root: NodeTag, traversal_type: TraversalType) -> std::vec::IntoIter<NodeTag> {
-        // First thing required is limiting the nodes to only those involved in the root tree.
-        // We will do this by building another graph with only the required nodes.
         let mut traversal_path = Vec::new();
         let mut visited = Vec::new();
         let mut has_cycle = false;
@@ -319,9 +419,9 @@ impl CallGraph {
             traversal_type,
             &mut has_cycle);
 
-        if has_cycle {
-            println!("Root: {:?} has cycle!", root);
-        }
+        // if has_cycle {
+        //     println!("Root: {:?} has cycle!", root);
+        // }
 
         traversal_path.into_iter()
     }
@@ -369,7 +469,6 @@ impl CallGraph {
                 }
             },
             TraversalType::PostOrder => {
-                // TODO : Infinite loop problem, need to separate the visted logic from travelpath(tp)
                 if let Some(node) = self.graph_nodes.get(&current_node) {
                     for child_tag in node.children() {
                         if call_stack.contains(&child_tag) {
@@ -437,6 +536,7 @@ impl Display for NodeTag {
 struct Node {
     tag: NodeTag,
     data: CallCtxt,
+    passed_locals: HashMap<Local, (DefId,Local)>,
     analyzed: bool,
     pred: Vec<NodeTag>,
     succ: Vec<NodeTag>,
@@ -451,12 +551,20 @@ impl Node {
         self.analyzed = true;
     }
 
+    fn analyzed(&self) -> bool {
+        self.analyzed
+    }
+
     fn children(&self) -> &Vec<NodeTag> {
         &self.succ
     }
 
     fn parents(&self) -> &Vec<NodeTag> {
         &self.pred
+    }
+
+    fn get_call_id(&self, local: Local) -> Option<&(DefId,Local)> {
+        self.passed_locals.get(&local)
     }
 }
 
@@ -475,6 +583,7 @@ impl Display for Node {
 struct CallCtxt {
     def_id: DefId,
     calls: Vec<Call>,
+    passed_locals: HashMap<Local,(DefId,Local)>,
 }
 
 impl Display for CallCtxt {
