@@ -2550,23 +2550,6 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
                     if let Some(local) = MirBorrowckCtxt::op_local(arg) {
                         let local_decl = self.mir.local_decls[local].clone();
                         if self.is_ty_mut_ref(local_decl.ty) {
-
-                            // FIXME : I think this might have to be done on the HIR level.
-
-                            if let Operand::Constant(con) = func {
-                                if let TyKind::FnDef(callee_id, _) = con.ty.sty {
-                                    let param_id = Local::from_usize(arg_id + 1);
-                                    // println!("callee_id: {:?}", callee_id);
-                                    let callee_mir = self.infcx.tcx.mir_validated(callee_id);
-                                    
-                                    // if self.is_ty_mut_ref(callee_mir.local_decls[param_id].ty) {
-                                    //     self.may_mut_refs.insert(local);
-                                    // }
-                                }
-                            } else {
-                                
-                            }
-
                             self.may_mut_refs.insert(local);
                         }
                     }
