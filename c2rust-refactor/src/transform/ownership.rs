@@ -15,6 +15,7 @@ use smallvec::SmallVec;
 
 use crate::ast_manip::{MutVisitNodes, MutVisit};
 use crate::ast_manip::fn_edit::flat_map_fns;
+use crate::ast_manip::fn_edit::{mut_visit_fns, FnKind};
 use crate::analysis::labeled_ty::LabeledTyCtxt;
 use crate::analysis::ownership::{self, ConcretePerm, Var, PTy};
 use crate::analysis::ownership::constraint::{ConstraintSet, Perm};
@@ -24,8 +25,11 @@ use crate::driver::{Phase};
 use crate::RefactorCtxt;
 use crate::type_map;
 use c2rust_ast_builder::{mk, IntoSymbol};
+use crate::transform::Transform;
 
 pub fn register_commands(reg: &mut Registry) {
+    use super::mk;
+    
     reg.register("ownership_annotate", |args| {
         let label = args.get(0).map_or("target", |x| x).into_symbol();
 
@@ -47,6 +51,10 @@ pub fn register_commands(reg: &mut Registry) {
             do_mark_pointers(st, cx);
         }))
     });
+
+    reg.register("ownership_pointer_analysis", |args| mk(PointerAnalysis {
+        path: args.get(0).expect("Expected path for pointer analysis").to_owned()
+    }));
 }
 
 /// # `ownership_annotate` Command
@@ -596,3 +604,73 @@ fn do_mark_pointers(st: &CommandState, cx: &RefactorCtxt) {
         st.add_mark(ast_ty.id, label);
     });
 }
+
+struct AnalysisResults {
+    // Temporarily mark as string, this likely will just become a String,HashSet
+    result_map: HashMap<String,HashSet<u32>>,
+}
+
+impl AnalysisResults {
+    fn pull_results(path: String) -> Self {
+        let mut result_map = HashMap::new();
+        
+        // Pull Format Here
+        
+        AnalysisResults { result_map }
+    }
+
+    fn no_alias(&self, fn_path: &String, param_id: u32) -> bool {
+        if let Some(na_set) = self.result_map.get(fn_path) {
+            na_set.contains(&param_id)
+        } else {
+            false
+        }
+    }
+}
+
+struct PointerAnalysis {
+    path: String,
+}
+
+impl Transform for PointerAnalysis {
+    fn transform(&self, krate: &mut Crate, st: &CommandState, cx: &RefactorCtxt) {
+        // SVF Results Map
+
+        // Iterate Over Functions
+        mut_visit_fns(krate, |fl| {
+            if fl.kind == FnKind::Foreign {
+                // TODO : Handling for foreign functions
+                return
+            }
+
+            for arg in fl.decl.inputs.iter() {
+                if let syntax::ast::PatKind::Ident(_, ident, _) = arg.pat.clone().into_inner().kind {
+                    if ident.to_string().contains("a") {
+                        println!("Marking arg({:?}) as {:?}", arg.ty, "noalias".into_symbol());
+                        st.add_mark(arg.ty.id, "noalias".into_symbol());
+                    }
+                }
+            }
+        });
+    }
+}
+
+// fn do_check_pointer_analysis(st: &CommandState, cx: &RefactorCtxt, path: String) {
+//     // Grab file results and split based on whatever metric we use
+//     // let svf_results = std::fs::read_to_string(&path).expect(&format!("Invalid path to svf_results: {:?}", path))
+//     //     .split(",") // Currently assumed pattern
+//     //     .map(|item| {
+//     //         let result : Vec<_> = item.split(":").collect();
+//     //         (result[0].to_string(),result[1].to_string())
+//     //     })
+//     //     .collect::<HashMap<String, String>>();
+
+//     mut_visit_fns(&st.krate(), |fl| {
+//         if fl.kind == FnKind::Foreign {
+//             // Case to handle foreign function interfaces
+//             return;
+//         }
+
+        
+//     })
+// }
