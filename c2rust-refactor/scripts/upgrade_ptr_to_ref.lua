@@ -1979,7 +1979,7 @@ function run_ptr_upgrades(node_id_cfgs)
         refactor:run_command("expand_local_ptr_tys", {})
         -- refactor:run_command("ownership_annotate", {"target"})
         refactor:run_command("ownership_mark_pointers", {})
-        refactor:run_command("ownership_pointer_analysis", {"path"})
+        refactor:run_command("ownership_pointer_analysis", {"/home/glados/Documents/projects/sample-format/c2r-analysis-results.txt"})
         -- refactor:dump_marks()
     end
 

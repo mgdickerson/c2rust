@@ -1,10 +1,12 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::io::BufRead;
 
 use arena::SyncDroplessArena;
 use rustc::hir::def_id::DefId;
 use rustc_index::vec::IndexVec;
 use syntax::ast::*;
+use syntax::ast::Path;
 use syntax::source_map::DUMMY_SP;
 use syntax::mut_visit::{self, MutVisitor};
 use syntax::parse::token::{self, Token, TokenKind, DelimToken};
@@ -605,23 +607,87 @@ fn do_mark_pointers(st: &CommandState, cx: &RefactorCtxt) {
     });
 }
 
+#[derive(Debug)]
 struct AnalysisResults {
     // Temporarily mark as string, this likely will just become a String,HashSet
-    result_map: HashMap<String,HashSet<u32>>,
+    result_map: HashMap<String,HashMap<String,HashSet<usize>>>,
 }
 
 impl AnalysisResults {
     fn pull_results(path: String) -> Self {
-        let mut result_map = HashMap::new();
+        let mut result_map : HashMap<String, HashMap<String, HashSet<usize>>> = HashMap::new();
         
         // Pull Format Here
+        match std::fs::File::open(path) {
+            Ok(result_file) => {
+                let reader = std::io::BufReader::new(result_file);
+
+                for line in reader.lines() {
+                    let module;
+                    let fn_name;
+                    let h_set;
+
+                    // Split line into fields
+                    if let Ok(ln) = line {
+                        // Each result should contain [module,fn_name,h_set]
+                        let result : Vec<&str> = ln.split(':').collect();
+
+                        match result.len() {
+                            3 => {
+                                if result[2].len() == 0 {
+                                    h_set = HashSet::new();
+                                    break;
+                                }
+                                let hs_creator : Vec<&str> = result[2].split(',').collect();
+                                let mut lhset = HashSet::new();
+
+                                for (i, val) in hs_creator.iter().enumerate() {
+                                    if val.parse::<u8>().expect("Expected Either 0 or 1.") == 1 {
+                                        lhset.insert(i);
+                                    }
+                                }
+
+                                h_set = lhset;
+                            },
+                            2 => {
+                                h_set = HashSet::new();
+                                println!("Reached case 2");
+                            },
+                            _ => panic!("Format unrecognized while parsing result file!"),
+                        }
+
+                        module = result[0].to_string();
+                        fn_name = result[1].to_string();
+                    } else {
+                        panic!("Error reading line from BufReader.");
+                    }
+
+                    // Add to result_map
+                    if let Some(function_map) = result_map.get_mut(&module) {
+                        // There is an assumption that no module can have two functions of the same name
+                        // thus we can simply insert without checking that it already exists
+                        function_map.insert(fn_name, h_set);
+                    } else {
+                        // Add module name to result_map
+                        let mut function_map = HashMap::new();
+                        function_map.insert(fn_name, h_set);
+                        result_map.insert(module, function_map);
+                    }
+                }
+            },
+            Err(e) => panic!(e),
+        }
         
         AnalysisResults { result_map }
     }
 
-    fn no_alias(&self, fn_path: &String, param_id: u32) -> bool {
-        if let Some(na_set) = self.result_map.get(fn_path) {
-            na_set.contains(&param_id)
+    fn no_alias(&self, module_name: String, fn_name: String, param_id: usize) -> bool {
+        if let Some(fn_map) = self.result_map.get(&module_name) {
+            if let Some(h_set) = fn_map.get(&fn_name) {
+                h_set.contains(&param_id)
+            } else {
+                false
+            }
         } else {
             false
         }
@@ -635,6 +701,8 @@ struct PointerAnalysis {
 impl Transform for PointerAnalysis {
     fn transform(&self, krate: &mut Crate, st: &CommandState, cx: &RefactorCtxt) {
         // SVF Results Map
+        let result = AnalysisResults::pull_results(self.path.clone());
+        // println!("Test Successful pull: {:?}", result);
 
         // Iterate Over Functions
         mut_visit_fns(krate, |fl| {
@@ -643,13 +711,27 @@ impl Transform for PointerAnalysis {
                 return
             }
 
-            for arg in fl.decl.inputs.iter() {
-                if let syntax::ast::PatKind::Ident(_, ident, _) = arg.pat.clone().into_inner().kind {
-                    if ident.to_string().contains("a") {
-                        println!("Marking arg({:?}) as {:?}", arg.ty, "noalias".into_symbol());
-                        st.add_mark(arg.ty.id, "noalias".into_symbol());
-                    }
+            for (param_id, arg) in fl.decl.inputs.iter().enumerate() {
+                // split #0 from fl.ident
+                let fl_string = fl.ident.to_string();
+                let fl_name : Vec<&str> = fl_string.split('#').collect();
+                if result.no_alias(String::from("test"), fl_name[0].to_string(), param_id) {
+                    println!("Marking arg {:?} as noalias", arg);
+                    st.add_mark(arg.ty.id, "noalias".into_symbol());
                 }
+                // println!("fl.ident: {:?}", fl_name[0].to_string());
+                // if no_alias(String::from("test"), fl.ident, 
+
+                // if let syntax::ast::PatKind::Ident(_, ident, _) = arg.pat.clone().into_inner().kind {
+                //     // Get path from Ident, trim as required for mapping.
+                //     let path = Path::from_ident(ident);
+                //     println!("Ident Path: {:?}", path);
+
+                //     if ident.to_string().contains("a") {
+                //         println!("Marking arg({:?}) as {:?}", arg.ty, "noalias".into_symbol());
+                //         st.add_mark(arg.ty.id, "noalias".into_symbol());
+                //     }
+                // }
             }
         });
     }
