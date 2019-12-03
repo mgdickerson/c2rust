@@ -715,7 +715,7 @@ impl Transform for PointerAnalysis {
                 // split #0 from fl.ident
                 let fl_string = fl.ident.to_string();
                 let fl_name : Vec<&str> = fl_string.split('#').collect();
-                if result.no_alias(String::from("test"), fl_name[0].to_string(), param_id) {
+                if result.no_alias(String::from("cJSON"), fl_name[0].to_string(), param_id) {
                     println!("Marking arg {:?} as noalias", arg);
                     st.add_mark(arg.ty.id, "noalias".into_symbol());
                 }
