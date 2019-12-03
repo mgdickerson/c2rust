@@ -6,7 +6,6 @@ use arena::SyncDroplessArena;
 use rustc::hir::def_id::DefId;
 use rustc_index::vec::IndexVec;
 use syntax::ast::*;
-use syntax::ast::Path;
 use syntax::source_map::DUMMY_SP;
 use syntax::mut_visit::{self, MutVisitor};
 use syntax::parse::token::{self, Token, TokenKind, DelimToken};
@@ -634,22 +633,24 @@ impl AnalysisResults {
 
                         match result.len() {
                             3 => {
+                                // Check for result 3, but empty 3rd param
                                 if result[2].len() == 0 {
                                     h_set = HashSet::new();
-                                    break;
-                                }
-                                let hs_creator : Vec<&str> = result[2].split(',').collect();
-                                let mut lhset = HashSet::new();
+                                } else {
+                                    let hs_creator : Vec<&str> = result[2].split(',').collect();
+                                    let mut lhset = HashSet::new();
 
-                                for (i, val) in hs_creator.iter().enumerate() {
-                                    if val.parse::<u8>().expect("Expected Either 0 or 1.") == 1 {
-                                        lhset.insert(i);
+                                    for (i, val) in hs_creator.iter().enumerate() {
+                                        if val.parse::<u8>().expect("Expected Either 0 or 1.") == 1 {
+                                            lhset.insert(i);
+                                        }
                                     }
-                                }
 
-                                h_set = lhset;
+                                    h_set = lhset;
+                                }
                             },
                             2 => {
+                                // This might be a case that never reaches.
                                 h_set = HashSet::new();
                                 println!("Reached case 2");
                             },
@@ -699,10 +700,9 @@ struct PointerAnalysis {
 }
 
 impl Transform for PointerAnalysis {
-    fn transform(&self, krate: &mut Crate, st: &CommandState, cx: &RefactorCtxt) {
+    fn transform(&self, krate: &mut Crate, st: &CommandState, _cx: &RefactorCtxt) {
         // SVF Results Map
         let result = AnalysisResults::pull_results(self.path.clone());
-        // println!("Test Successful pull: {:?}", result);
 
         // Iterate Over Functions
         mut_visit_fns(krate, |fl| {
@@ -716,43 +716,9 @@ impl Transform for PointerAnalysis {
                 let fl_string = fl.ident.to_string();
                 let fl_name : Vec<&str> = fl_string.split('#').collect();
                 if result.no_alias(String::from("cJSON"), fl_name[0].to_string(), param_id) {
-                    println!("Marking arg {:?} as noalias", arg);
                     st.add_mark(arg.ty.id, "noalias".into_symbol());
                 }
-                // println!("fl.ident: {:?}", fl_name[0].to_string());
-                // if no_alias(String::from("test"), fl.ident, 
-
-                // if let syntax::ast::PatKind::Ident(_, ident, _) = arg.pat.clone().into_inner().kind {
-                //     // Get path from Ident, trim as required for mapping.
-                //     let path = Path::from_ident(ident);
-                //     println!("Ident Path: {:?}", path);
-
-                //     if ident.to_string().contains("a") {
-                //         println!("Marking arg({:?}) as {:?}", arg.ty, "noalias".into_symbol());
-                //         st.add_mark(arg.ty.id, "noalias".into_symbol());
-                //     }
-                // }
             }
         });
     }
 }
-
-// fn do_check_pointer_analysis(st: &CommandState, cx: &RefactorCtxt, path: String) {
-//     // Grab file results and split based on whatever metric we use
-//     // let svf_results = std::fs::read_to_string(&path).expect(&format!("Invalid path to svf_results: {:?}", path))
-//     //     .split(",") // Currently assumed pattern
-//     //     .map(|item| {
-//     //         let result : Vec<_> = item.split(":").collect();
-//     //         (result[0].to_string(),result[1].to_string())
-//     //     })
-//     //     .collect::<HashMap<String, String>>();
-
-//     mut_visit_fns(&st.krate(), |fl| {
-//         if fl.kind == FnKind::Foreign {
-//             // Case to handle foreign function interfaces
-//             return;
-//         }
-
-        
-//     })
-// }

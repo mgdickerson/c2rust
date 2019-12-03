@@ -112,7 +112,7 @@ function ConvConfig.from_marks_and_attrs(marks, attrs)
     local noalias = marks["noalias"]
 
     if not noalias then
-        print("I have reached here.")
+        -- print("I have reached here.")
         return
     end
 
@@ -1979,7 +1979,7 @@ function run_ptr_upgrades(node_id_cfgs)
         refactor:run_command("expand_local_ptr_tys", {})
         -- refactor:run_command("ownership_annotate", {"target"})
         refactor:run_command("ownership_mark_pointers", {})
-        -- refactor:run_command("ownership_pointer_analysis", {"/home/glados/Documents/projects/sample-format/gJSON.txt"})
+        refactor:run_command("ownership_pointer_analysis", {"/home/glados/Documents/projects/sample-format/gJSON.txt"})
         -- refactor:dump_marks()
     end
 
