@@ -57,6 +57,7 @@ pub fn run_lua_file(
     config: interface::Config,
     registry: command::Registry,
     rewrite_modes: Vec<OutputMode>,
+    sc_args: Vec<String>,
 ) -> io::Result<()> {
     let mut file = File::open(script_path)?;
     let mut script = vec![];
@@ -90,6 +91,15 @@ pub fn run_lua_file(
                                   DUMMY_NODE_ID.to_lua_ext(lua_ctx)?)?;
             lua_ctx.globals().set("DUMMY_SP",
                                   DUMMY_SP.to_lua_ext(lua_ctx)?)?;
+
+            // Create lua array_table
+            let arg_table = lua_ctx.create_table()?;
+            for (i, sc_arg) in sc_args.iter().enumerate() {
+                arg_table.set(i + 1, sc_arg.to_owned())?;
+            }
+
+            // Set passed args to global
+            lua_ctx.globals().set("sc_args", arg_table)?;
 
             // Load the script into the created scope
             lua_ctx.scope(|scope| {

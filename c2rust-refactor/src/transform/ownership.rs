@@ -7,7 +7,7 @@ use arena::SyncDroplessArena;
 use rustc::hir::def_id::DefId;
 use rustc_index::vec::IndexVec;
 use syntax::ast::*;
-use syntax::attr::{self};
+// use syntax::attr::{self};
 use syntax::source_map::DUMMY_SP;
 use syntax::mut_visit::{self, MutVisitor};
 use syntax::parse::token::{self, Token, TokenKind, DelimToken};
@@ -18,7 +18,7 @@ use smallvec::SmallVec;
 
 use crate::ast_manip::{MutVisitNodes, MutVisit};
 use crate::ast_manip::fn_edit::flat_map_fns;
-use crate::ast_manip::fn_edit::{mut_visit_fns, FnKind};
+// use crate::ast_manip::fn_edit::{mut_visit_fns, FnKind};
 use crate::ast_manip::visit_nodes;
 use crate::analysis::labeled_ty::LabeledTyCtxt;
 use crate::analysis::ownership::{self, ConcretePerm, Var, PTy};
@@ -711,8 +711,7 @@ impl Transform for PointerAnalysis {
         // SVF Results Map
         let result = AnalysisResults::pull_results(self.path.clone());
 
-        // TODO : Make Multi-Module
-        // TODO : Add arguement passing to Lua script
+        // TODO : Test arguement passing to lua.
 
         // Used for fns already visited on the module level iteration (properly attributed a module name there)
         let mut visited_fns = HashSet::new();

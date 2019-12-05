@@ -175,6 +175,7 @@ pub struct Options {
 
     pub plugins: Vec<String>,
     pub plugin_dirs: Vec<String>,
+    pub script_args: Vec<String>,
 }
 
 /// Try to find the rustup installation that provides the rustc at the given path.  The input path
@@ -461,6 +462,7 @@ fn main_impl(opts: Options) -> interface::Result<()> {
                 config,
                 cmd_reg,
                 opts.rewrite_modes.clone(),
+                opts.script_args.clone(),
             ).expect("Error loading user script");
         } else {
             let file_io = Arc::new(file_io::RealFileIO::new(opts.rewrite_modes.clone()));
