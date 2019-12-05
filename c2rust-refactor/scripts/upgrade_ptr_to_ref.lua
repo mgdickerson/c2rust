@@ -100,7 +100,7 @@ function ConvConfig:is_mut()
 end
 
 function ConvConfig.from_marks_and_attrs(marks, attrs)
-    local opt = true
+    local opt = marks["nonnull"] == nil
     local slice = false
     local mutability = nil
     local binding = nil
