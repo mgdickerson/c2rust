@@ -1,11 +1,13 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::io::BufRead;
+use std::path::PathBuf;
 
 use arena::SyncDroplessArena;
 use rustc::hir::def_id::DefId;
 use rustc_index::vec::IndexVec;
 use syntax::ast::*;
+use syntax::attr::{self};
 use syntax::source_map::DUMMY_SP;
 use syntax::mut_visit::{self, MutVisitor};
 use syntax::parse::token::{self, Token, TokenKind, DelimToken};
@@ -17,6 +19,7 @@ use smallvec::SmallVec;
 use crate::ast_manip::{MutVisitNodes, MutVisit};
 use crate::ast_manip::fn_edit::flat_map_fns;
 use crate::ast_manip::fn_edit::{mut_visit_fns, FnKind};
+use crate::ast_manip::visit_nodes;
 use crate::analysis::labeled_ty::LabeledTyCtxt;
 use crate::analysis::ownership::{self, ConcretePerm, Var, PTy};
 use crate::analysis::ownership::constraint::{ConstraintSet, Perm};
@@ -609,12 +612,12 @@ fn do_mark_pointers(st: &CommandState, cx: &RefactorCtxt) {
 #[derive(Debug)]
 struct AnalysisResults {
     // Temporarily mark as string, this likely will just become a String,HashSet
-    result_map: HashMap<String,HashMap<String,HashSet<usize>>>,
+    result_map: HashMap<String,HashMap<String,HashMap<usize, Vec<String>>>>,
 }
 
 impl AnalysisResults {
     fn pull_results(path: String) -> Self {
-        let mut result_map : HashMap<String, HashMap<String, HashSet<usize>>> = HashMap::new();
+        let mut result_map : HashMap<String, HashMap<String, HashMap<usize, Vec<String>>>> = HashMap::new();
         
         // Pull Format Here
         match std::fs::File::open(path) {
@@ -624,54 +627,58 @@ impl AnalysisResults {
                 for line in reader.lines() {
                     let module;
                     let fn_name;
-                    let h_set;
+                    let h_map;
 
                     // Split line into fields
                     if let Ok(ln) = line {
                         // Each result should contain [module,fn_name,h_set]
                         let result : Vec<&str> = ln.split(':').collect();
 
-                        match result.len() {
-                            3 => {
-                                // Check for result 3, but empty 3rd param
-                                if result[2].len() == 0 {
-                                    h_set = HashSet::new();
-                                } else {
-                                    let hs_creator : Vec<&str> = result[2].split(',').collect();
-                                    let mut lhset = HashSet::new();
+                        // If splitting has len = 3, construct h_set
+                        if result.len() == 3 {
+                            if result[2].len() == 0 {
+                                // Split to an empty string (ie: no parameters)
+                                h_map = HashMap::new();
+                            } else {
+                                let hm_creator : Vec<&str> = result[2].split(',').collect();
+                                let mut lhmap = HashMap::new();
 
-                                    for (i, val) in hs_creator.iter().enumerate() {
-                                        if val.parse::<u8>().expect("Expected Either 0 or 1.") == 1 {
-                                            lhset.insert(i);
+                                for (param_id, attrs) in hm_creator.iter().enumerate() {
+                                    if attrs.trim().len() == 0 {
+                                        lhmap.insert(param_id, Vec::new());
+                                    } else {
+                                        let mut attr_vec : Vec<String> = Vec::new();
+                                        for attr in attrs.split("+").collect::<Vec<&str>>().iter() {
+                                            attr_vec.push(attr.trim().to_string());
                                         }
+                                        lhmap.insert(param_id, attr_vec);
                                     }
-
-                                    h_set = lhset;
                                 }
-                            },
-                            2 => {
-                                // This might be a case that never reaches.
-                                h_set = HashSet::new();
-                                println!("Reached case 2");
-                            },
-                            _ => panic!("Format unrecognized while parsing result file!"),
+
+                                h_map = lhmap;
+                            }
+                        } else {
+                            // General Error case (or no parameters)
+                            h_map = HashMap::new();
                         }
 
-                        module = result[0].to_string();
+                        // Module names containing a '-' must be converted to '_'
+                        module = result[0].to_string().replace("-","_");
                         fn_name = result[1].to_string();
                     } else {
-                        panic!("Error reading line from BufReader.");
+                        // Could be empty line or any other error in reading, just continue over.
+                        continue;
                     }
 
                     // Add to result_map
                     if let Some(function_map) = result_map.get_mut(&module) {
                         // There is an assumption that no module can have two functions of the same name
                         // thus we can simply insert without checking that it already exists
-                        function_map.insert(fn_name, h_set);
+                        function_map.insert(fn_name, h_map);
                     } else {
                         // Add module name to result_map
                         let mut function_map = HashMap::new();
-                        function_map.insert(fn_name, h_set);
+                        function_map.insert(fn_name, h_map);
                         result_map.insert(module, function_map);
                     }
                 }
@@ -682,15 +689,15 @@ impl AnalysisResults {
         AnalysisResults { result_map }
     }
 
-    fn no_alias(&self, module_name: String, fn_name: String, param_id: usize) -> bool {
-        if let Some(fn_map) = self.result_map.get(&module_name) {
-            if let Some(h_set) = fn_map.get(&fn_name) {
-                h_set.contains(&param_id)
+    fn trait_set(&self, module_name: &String, fn_name: &String, param_id: usize) -> Option<&Vec<String>> {
+        if let Some(fn_map) = self.result_map.get(module_name) {
+            if let Some(h_set) = fn_map.get(fn_name) {
+                h_set.get(&param_id)
             } else {
-                false
+                None
             }
         } else {
-            false
+            None
         }
     }
 }
@@ -700,25 +707,99 @@ struct PointerAnalysis {
 }
 
 impl Transform for PointerAnalysis {
-    fn transform(&self, krate: &mut Crate, st: &CommandState, _cx: &RefactorCtxt) {
+    fn transform(&self, krate: &mut Crate, st: &CommandState, cx: &RefactorCtxt) {
         // SVF Results Map
         let result = AnalysisResults::pull_results(self.path.clone());
 
-        // Iterate Over Functions
-        mut_visit_fns(krate, |fl| {
-            if fl.kind == FnKind::Foreign {
-                // TODO : Handling for foreign functions
-                return
-            }
+        // TODO : Make Multi-Module
+        // TODO : Add arguement passing to Lua script
 
-            for (param_id, arg) in fl.decl.inputs.iter().enumerate() {
-                // split #0 from fl.ident
-                let fl_string = fl.ident.to_string();
-                let fl_name : Vec<&str> = fl_string.split('#').collect();
-                if result.no_alias(String::from("cJSON"), fl_name[0].to_string(), param_id) {
-                    st.add_mark(arg.ty.id, "noalias".into_symbol());
-                }
+        // Used for fns already visited on the module level iteration (properly attributed a module name there)
+        let mut visited_fns = HashSet::new();
+        let parent_module = pull_parent_module(&cx.session().local_crate_source_file);
+
+        // Assumption of single module level (unsafe assumption later, but will work for now)
+        visit_nodes(krate, |i: &Item| {
+            match &i.kind {
+                ItemKind::Mod(m) => {
+                    // Found module of name i.ident
+                    for si in &m.items {
+                        match &si.kind {
+                            ItemKind::Mod(_sub_m) => {
+                                // TODO :
+                                // For single module level, this is not a case that will be reached,
+                                // later I will need to flatten this with continually constructed module naming.
+                                
+                                // Found sub-sub-modules
+                                // println!("Found sub module: {:?}", si.ident);
+                            },
+                            ItemKind::Fn(decl, ..) => {
+                                if !visited_fns.contains(&si.ident) {
+                                    // println!("Found sub fn: {}:{}", i.ident, si.ident);pip
+                                    // For each parameter in fn decls, check if result map has information
+                                    for (param_id, arg) in decl.inputs.iter().enumerate() {
+                                        if let Some(trait_set) = result.trait_set(&i.ident.to_string(), &si.ident.to_string(), param_id) {
+                                            for t in trait_set {
+                                                st.add_mark(arg.ty.id, t.into_symbol());
+                                            }
+                                        }
+                                    }
+                                }
+                                
+                                // Add fn name to visited chart
+                                visited_fns.insert(si.ident.clone());
+                            },
+                            _ => {
+                                // Unconcerned about items of 'other' type.
+                            },
+                        }
+                    }
+                },
+                // TODO : Check if I can safely assume all Module functions will be visited before parent_module Functions.
+                // ItemKind::Fn(decl, ..) => {
+                //     if !visited_fns.contains(&i.ident) {
+                //         // Found fn from 'parent_module'
+
+                //         // if i.ident.to_string() == "foo" {
+                //         //     println!("No need to trim.");
+                //         // }
+                //         println!("Item of fn_type: {}:{}", parent_module.clone().unwrap(), i.ident);
+                //     }
+                // },
+                _ => { /* items of other type */ },
             }
         });
+
+        // Run over nodes again but for 'parent_module' functions so that assumption of 
+        // all modules being visited first is not necessary
+        visit_nodes(krate, |i: &Item| {
+            match &i.kind {
+                ItemKind::Fn(decl, ..) => {
+                    if !visited_fns.contains(&i.ident) {
+                        for (param_id, arg) in decl.inputs.iter().enumerate() {
+                            if let Some(trait_set) = result.trait_set(parent_module.as_ref().expect("Expected parent level module."), &i.ident.to_string(), param_id) {
+                                for t in trait_set {
+                                    st.add_mark(arg.ty.id, t.into_symbol());
+                                }
+                            }
+                        }
+                    }
+                },
+                _ => {},
+            }
+        });
+    }
+}
+
+fn pull_parent_module(path: &Option<PathBuf>) -> Option<String> {
+    if let Some(path_buf) = path {
+        let file_name = path_buf.file_name().expect("Expected path to have filename.").to_str();
+        if let Some(flnm) = file_name {
+            Some(flnm.trim_end_matches(".rs").to_string())
+        } else {
+            None
+        }
+    } else {
+        None
     }
 }
