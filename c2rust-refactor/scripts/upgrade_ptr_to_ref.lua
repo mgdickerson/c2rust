@@ -1979,8 +1979,7 @@ function run_ptr_upgrades(node_id_cfgs)
         refactor:run_command("expand_local_ptr_tys", {})
         -- refactor:run_command("ownership_annotate", {"target"})
         refactor:run_command("ownership_mark_pointers", {})
-        -- arg[1] doesn't work, need different pass method
-        refactor:run_command("ownership_pointer_analysis", {arg[1]})
+        refactor:run_command("ownership_pointer_analysis", {sc_args[1]})
         -- refactor:dump_marks()
     end
 

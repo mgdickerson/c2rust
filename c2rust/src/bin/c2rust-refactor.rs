@@ -128,6 +128,12 @@ fn parse_opts(args: &ArgMatches) -> Option<Options> {
         marks.push(Mark::new(id, label));
     }
 
+    // Parse script arguments
+    let script_args = match args.values_of("script-args") {
+        Some(sc_args) => sc_args.map(|a| a.to_string()).collect(),
+        None => Vec::new()
+    };
+
     // Get plugin options
     let plugins = args.values_of_lossy("plugin-name").unwrap_or(vec![]);
     let plugin_dirs = args.values_of_lossy("plugin-dir").unwrap_or(vec![]);
@@ -197,5 +203,6 @@ fn parse_opts(args: &ArgMatches) -> Option<Options> {
         marks,
         plugins,
         plugin_dirs,
+        script_args,
     })
 }

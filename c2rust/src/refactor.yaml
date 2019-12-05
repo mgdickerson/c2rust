@@ -40,6 +40,14 @@ args:
       value_name: "ID[:LABEL]"
       number_of_values: 1
       multiple: true
+  - script-args:
+      short: s
+      long: script-args
+      help: "arguements passed to scripts as global sc_args"
+      takes_value: true
+      multiple: true
+      value_delimiter: ','
+      value_name: S_ARGS
   - plugin-name:
       short: p
       long: plugin-name
@@ -92,3 +100,4 @@ args:
       multiple: true
       last: true
       required_unless: cargo
+
