@@ -177,7 +177,7 @@ def do_one_impl(s, kind_map, boxed, emit_ldoc):
         yield '    if _kind == "%s" {' % s.name
         yield '      Ok(%s%s {' % ('P(' if boxed else '', s.name)
         for f in s.fields:
-            yield '        %s: FromLuaExt::from_lua_ext(_table.get::<_, Value>("%s")?, _lua_ctx)?,' % (f.name, f.name)
+            yield '        %s: from_lua_prepend_field("%s", FromLuaExt::from_lua_ext(_table.get::<_, Value>("%s")?, _lua_ctx))?,' % (f.name, f.name, f.name)
             # TODO: kind folding???
 
         yield '      }%s)' % (')' if boxed else '')
@@ -210,6 +210,21 @@ def do_one_impl(s, kind_map, boxed, emit_ldoc):
 
     yield '  }'
     yield '}'
+
+    # FromLuaString implementation for enums
+    if isinstance(s, Enum):
+        yield 'impl TryFromString for %s {' % type_name
+        yield '  fn try_from_string<\'lua>(_str: &str) -> Option<Self> {'
+        yield '    match _str {'
+        for v in s.variants:
+            if len(v.fields) == 0:
+                fpat = struct_pattern(v, '%s::%s' % (s.name, v.name))
+                yield '      "%s" => Some(%s),' % (v.name, fpat)
+        yield '      _ => None'
+        yield '    }'
+        yield '  }'
+        yield '}'
+
 
 @linewise
 def do_impl(s, kind_map):

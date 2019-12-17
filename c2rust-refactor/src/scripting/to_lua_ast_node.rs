@@ -20,7 +20,7 @@ use syntax::tokenstream::{DelimSpan, TokenStream, TokenTree};
 use syntax::ThinVec;
 use syntax_pos::{Span, SyntaxContext};
 
-use rlua::{AnyUserData, Context, Error, FromLua, Function, MetaMethod, Result, Scope, ToLua, UserData, UserDataMethods, Value};
+use rlua::{Context, Error, FromLua, Function, MetaMethod, Result, Scope, ToLua, UserData, UserDataMethods, Value};
 use rlua::prelude::{LuaString, LuaTable};
 
 use crate::ast_manip::{util, visit_nodes, AstName, AstNode, WalkAst};
@@ -312,8 +312,20 @@ pub(crate) trait FromLuaTable: Sized {
     fn from_lua_table<'lua>(table: LuaTable<'lua>, lua: Context<'lua>) -> Result<Self>;
 }
 
+/// Internal trait that tries to convert a string into an enum object.
+pub(crate) trait TryFromString: Sized {
+    fn try_from_string(s: &str) -> Option<Self>;
+}
+
+/// Default implementation for `TryFromString`. Most things don't convert.
+impl<T> TryFromString for T {
+    default fn try_from_string(_str: &str) -> Option<Self> {
+        None
+    }
+}
+
 impl<T> FromLuaExt for T
-    where T: 'static + Sized + Clone + FromLuaTable,
+    where T: 'static + Sized + Clone + FromLuaTable + TryFromString,
           LuaAstNode<T>: UserData + LuaAstNodeSafe,
 {
     fn from_lua_ext<'lua>(value: Value<'lua>, lua: Context<'lua>) -> Result<Self> {
@@ -323,14 +335,37 @@ impl<T> FromLuaExt for T
                 let node = node.borrow().clone();
                 Ok(node)
             }
+
             Value::Table(t) => FromLuaTable::from_lua_table(t, lua),
-            _ => Err(Error::UserDataTypeMismatch)
+
+            Value::String(s) => TryFromString::try_from_string(s.to_str()?).ok_or_else(|| {
+                Error::FromLuaConversionError {
+                    from: "String",
+                    to: std::any::type_name::<T>(),
+                    message: None,
+                }
+            }),
+
+            Value::Nil => Err(Error::FromLuaConversionError {
+                from: "Nil",
+                to: std::any::type_name::<T>(),
+                message: None,
+            }),
+
+            _ => Err(Error::FromLuaConversionError {
+                // FIXME: we should get this from `value.type_name()`,
+                // but that method is currently private, see
+                // https://github.com/kyren/rlua/issues/58
+                from: "Value",
+                to: std::any::type_name::<T>(),
+                message: None,
+            })
         }
     }
 }
 
 impl<T> FromLuaAstNode for LuaAstNode<T>
-    where T: 'static + Sized + FromLuaTable,
+    where T: 'static + Sized + FromLuaTable + TryFromString,
           LuaAstNode<T>: UserData + Clone,
 {
     fn from_lua_ast_node<'lua>(value: Value<'lua>, lua: Context<'lua>) -> Result<Self> {
@@ -339,11 +374,31 @@ impl<T> FromLuaAstNode for LuaAstNode<T>
                 let node = &*ud.borrow::<LuaAstNode<T>>()?;
                 Ok(node.clone())
             }
+
             Value::Table(t) => {
                 let node = FromLuaTable::from_lua_table(t, lua)?;
                 Ok(LuaAstNode::new(node))
             }
-            _ => Err(Error::UserDataTypeMismatch)
+
+            Value::String(s) => TryFromString::try_from_string(s.to_str()?).ok_or_else(|| {
+                Error::FromLuaConversionError {
+                    from: "String",
+                    to: std::any::type_name::<T>(),
+                    message: None,
+                }
+            }).map(LuaAstNode::new),
+
+            Value::Nil => Err(Error::FromLuaConversionError {
+                from: "Nil",
+                to: std::any::type_name::<T>(),
+                message: None,
+            }),
+
+            _ => Err(Error::FromLuaConversionError {
+                from: "Value",
+                to: std::any::type_name::<T>(),
+                message: None,
+            })
         }
     }
 }
@@ -500,8 +555,18 @@ impl FromLuaExt for char {
 }
 
 impl FromLuaExt for NodeId {
-    fn from_lua_ext<'lua>(value: Value<'lua>, lua: Context<'lua>) -> Result<Self> {
-        Ok(NodeId::from_u32(FromLua::from_lua(value, lua)?))
+    fn from_lua_ext<'lua>(value: Value<'lua>, _lua: Context<'lua>) -> Result<Self> {
+        match value {
+            Value::Integer(x) => Ok(NodeId::from_u32(x as u32)),
+
+            Value::Nil => Ok(DUMMY_NODE_ID),
+
+            _ => Err(Error::FromLuaConversionError {
+                from: "Value",
+                to: "NodeId",
+                message: None,
+            })
+        }
     }
 }
 
@@ -591,6 +656,30 @@ fn from_lua_kind_error<T>(expected: &'static str, actual: &str) -> Result<T> {
         to: expected,
         message: Some(format!("expected kind {}, got {}", expected, actual)),
     })
+}
+
+fn from_lua_prepend_field<T>(field: &'static str, res: Result<T>) -> Result<T> {
+    match res {
+        Err(Error::FromLuaConversionError { from, to, message: None }) => {
+            Err(Error::FromLuaConversionError {
+                from,
+                to,
+                message: Some(format!("field '{}' in '{}'", field,
+                                      std::any::type_name::<T>())),
+            })
+        }
+
+        Err(Error::FromLuaConversionError { from, to, message: Some(msg) }) => {
+            Err(Error::FromLuaConversionError {
+                from,
+                to,
+                message: Some(format!("field '{}' in '{}': {}", field,
+                                      std::any::type_name::<T>(), msg)),
+            })
+        }
+
+        _ => res
+    }
 }
 
 include!(concat!(env!("OUT_DIR"), "/lua_ast_node_gen.inc.rs"));
@@ -853,10 +942,21 @@ impl ToLuaExt for Span {
 }
 
 impl FromLuaExt for Span {
-    fn from_lua_ext<'lua>(value: Value<'lua>, lua: Context<'lua>) -> Result<Self> {
-        let ud: AnyUserData = FromLua::from_lua(value, lua)?;
-        let sd = ud.borrow::<SpanData>()?;
-        Ok(sd.0.with_ctxt(sd.0.ctxt))
+    fn from_lua_ext<'lua>(value: Value<'lua>, _lua: Context<'lua>) -> Result<Self> {
+        match value {
+            Value::UserData(ud) => {
+                let sd = ud.borrow::<SpanData>()?;
+                Ok(sd.0.with_ctxt(sd.0.ctxt))
+            }
+
+            Value::Nil => Ok(DUMMY_SP),
+
+            _ => Err(Error::FromLuaConversionError {
+                from: "Value",
+                to: "Span",
+                message: None,
+            })
+        }
     }
 }
 

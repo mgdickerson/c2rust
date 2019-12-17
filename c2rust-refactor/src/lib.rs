@@ -7,6 +7,8 @@
     vec_remove_item,
     option_flattening,
     drain_filter,
+    label_break_value,
+    slice_patterns,
 )]
 #![cfg_attr(feature = "profile", feature(proc_macro_hygiene))]
 
@@ -36,6 +38,7 @@ extern crate rustc_metadata;
 extern crate rustc_privacy;
 extern crate rustc_resolve;
 extern crate rustc_target;
+extern crate rustc_typeck;
 #[macro_use]
 extern crate smallvec;
 extern crate c2rust_ast_builder;
@@ -371,6 +374,11 @@ pub fn lib_main(opts: Options) -> interface::Result<()> {
     if let Some(toolchain_ver) = option_env!("RUSTUP_TOOLCHAIN") {
         env::set_var("RUSTUP_TOOLCHAIN", toolchain_ver);
     }
+
+    // Shut the compiler up while refactoring
+    let mut rustflags = env::var_os("RUSTFLAGS").unwrap_or_default();
+    rustflags.push(" -Awarnings");
+    env::set_var("RUSTFLAGS", rustflags);
 
     rustc_driver::catch_fatal_errors(move || main_impl(opts)).and_then(|x| x)
 }

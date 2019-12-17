@@ -43,6 +43,8 @@ extern "C" {
     #[no_mangle]
     fn get_ptr() -> *mut u32;
     #[no_mangle]
+    fn get_struct_ptr() -> *mut Ctx;
+    #[no_mangle]
     type _reent;
     #[no_mangle]
     static mut _impure_ptr: *mut _reent;
@@ -660,11 +662,20 @@ pub unsafe extern "C" fn __vsprintf_chk(mut buf: *mut libc::c_char,
 
 unsafe fn non_null_type() {
     let mut ptr = 0 as *mut u32;
+    let mut sptr = 0 as *mut Ctx;
 
     ptr = get_ptr();
+    sptr = get_struct_ptr();
 
     *ptr = 1;
     *ptr;
+    takes_ptrs(ptr, 0 as *const _);
+
+    if *ptr as libc::c_int == ':' as i32 && *ptr.offset(1) as libc::c_int == ':' as i32 {
+        ptr = ptr.offset(1)
+    }
+
+    (*sptr).data[0] = 1;
 }
 
 fn rewritten(#[slice] p: *const u32, #[slice] q: *const u32) {}
@@ -686,4 +697,39 @@ unsafe extern "C" fn decay_binary(ptr: *mut _reent) {
 #[ownership_constraints(le(MOVE, _0))]
 unsafe extern "C" fn box_to_box(ptr: *mut _reent) {
     box_to_box(ptr)
+}
+
+#[ownership_constraints(le(WRITE, _0), le(WRITE, _0))]
+unsafe extern "C" fn takes_refs(_r: *mut _reent, _r2: *const _reent) {}
+
+#[ownership_constraints(le(MOVE, _0), le(MOVE, _1))]
+unsafe extern "C" fn opt_box_to_opt_ref(mut box1: *mut _reent, box2: *mut _reent) {
+    takes_refs(box1, box2);
+}
+
+#[ownership_constraints(le(MOVE, _0), le(MOVE, _1))]
+unsafe extern "C" fn opt_box_to_ptr(mut box1: *mut u32, mut box2: *mut u32) {
+    takes_ptrs(box1, box2);
+}
+
+unsafe fn array_ref2() {
+    let mut q: [u32; 4] = [0; 4];
+    let r: [u32; 4] = [0; 4];
+
+    // FIXME: Should produce &mut q but broken due to
+    // https://github.com/immunant/c2rust/issues/163
+    #[nonnull]
+    #[slice]
+    let mut s = q.as_mut_ptr();
+    #[nonnull]
+    #[slice]
+    let mut t = r.as_ptr();
+
+    // FIXME: See earlier comment
+    // *s.offset(0) = *t.offset(1);
+
+    #[slice]
+    #[nonnull]
+    let fresh = t;
+    t = t.offset(1);
 }

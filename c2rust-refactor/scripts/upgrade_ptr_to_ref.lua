@@ -5,7 +5,8 @@ require "pl"
 Variable = {}
 
 function Variable.new(node_id, kind)
-    self = {}
+    local self = {}
+
     self.id = node_id
     self.kind = kind
     self.shadowed = false
@@ -19,7 +20,8 @@ end
 Field = {}
 
 function Field.new(node_id)
-    self = {}
+    local self = {}
+
     self.id = node_id
 
     setmetatable(self, Field)
@@ -44,7 +46,8 @@ end
 Struct = {}
 
 function Struct.new(lifetimes, is_copy)
-    self = {}
+    local self = {}
+
     self.lifetimes = lifetimes
     self.is_copy = is_copy
 
@@ -57,7 +60,8 @@ end
 Fn = {}
 
 function Fn.new(node_id, is_foreign, arg_ids)
-    self = {}
+    local self = {}
+
     self.id = node_id
     self.is_foreign = is_foreign
     self.arg_ids = arg_ids
@@ -71,7 +75,8 @@ end
 ConvConfig = {}
 
 function ConvConfig.new(args)
-    self = {}
+    local self = {}
+
     self.conv_type = args[1]
 
     for i, arg in ipairs(args) do
@@ -95,7 +100,7 @@ function ConvConfig:is_mut()
 end
 
 function ConvConfig.from_marks_and_attrs(marks, attrs)
-    local opt = true
+    local opt = marks["nonnull"] == nil
     local slice = false
     local mutability = nil
     local binding = nil
@@ -167,6 +172,14 @@ function ConvConfig.from_marks_and_attrs(marks, attrs)
     end
 
     return ConvConfig.new{conv_type, mutability=mutability, binding=binding}
+end
+
+function ConvConfig:failed_rewrite()
+    return self.extra_data.failed_rewrite
+end
+
+function ConvConfig:non_null_wrapped()
+    return self.extra_data.non_null_wrapped
 end
 
 function ConvConfig:is_slice()
@@ -244,11 +257,99 @@ end
 Ty = {}
 
 function Ty.new(kind)
-    self = {}
+    local self = {}
+
     self[1] = "Ty"
     self.id = DUMMY_NODE_ID
     self.span = DUMMY_SP
     self.kind = kind
+
+    setmetatable(self, Ty)
+    Ty.__index = Ty
+
+    return self
+end
+
+Expr = {}
+
+function Expr.new(kind, attrs)
+    local self = {}
+
+    self[1] = "Expr"
+    self.id = DUMMY_NODE_ID
+    self.span = DUMMY_SP
+    self.kind = kind
+    self.attrs = attrs or {}
+
+    setmetatable(self, Expr)
+    Expr.__index = Expr
+
+    return self
+end
+
+Pat = {}
+
+function Pat.new(kind)
+    local self = {}
+
+    self[1] = "Pat"
+    self.id = DUMMY_NODE_ID
+    self.span = DUMMY_SP
+    self.kind = kind
+
+    setmetatable(self, Pat)
+    Pat.__index = Pat
+
+    return self
+end
+
+Ident = {}
+
+function Ident.new(name)
+    local self = {}
+
+    self[1] = "Ident"
+    self.name = name
+    self.span = DUMMY_SP
+
+    setmetatable(self, Ident)
+    Ident.__index = Ident
+
+    return self
+end
+
+PathSegment = {}
+
+function PathSegment.new(ident, args)
+    local self = {}
+
+    self[1] = "PathSegment"
+    self.ident = Ident.new(ident)
+    self.args = args
+    self.id = DUMMY_NODE_ID
+
+    setmetatable(self, PathSegment)
+    PathSegment.__index = PathSegment
+
+    return self
+end
+
+Path = {}
+
+function Path.new(segments)
+    local self = {}
+    local path_segments = {}
+
+    for _, segment in ipairs(segments) do
+        table.insert(path_segments, PathSegment.new(segment))
+    end
+
+    self[1] = "Path"
+    self.span = DUMMY_SP
+    self.segments = path_segments
+
+    setmetatable(self, Path)
+    Path.__index = Path
 
     return self
 end
@@ -256,7 +357,8 @@ end
 Visitor = {}
 
 function Visitor.new(tctx, node_id_cfgs)
-    self = {}
+    local self = {}
+
     self.tctx = tctx
     -- NodeId -> ConvConfig
     self.node_id_cfgs = node_id_cfgs
@@ -268,6 +370,8 @@ function Visitor.new(tctx, node_id_cfgs)
     self.structs = {}
     -- HirId -> Fn
     self.fns = {}
+    -- Expr NodeId -> Arg NodeId
+    self.call_param_expr_to_arg_id = {}
 
     setmetatable(self, Visitor)
     Visitor.__index = Visitor
@@ -433,11 +537,11 @@ function Visitor:rewrite_binary_expr(expr)
 
     -- If lhs is rewritten but rhs isn't, decay lhs to ptr
     if lhs_config and not rhs_config then
-        lhs = decay_ref_to_ptr(lhs, lhs_config, true)
+        lhs = decay_ref_to_ptr(lhs, lhs_config)
         expr:replace_child(2, lhs)
     -- If rhs is rewritten but lhs isn't, decay rhs to ptr
     elseif rhs_config and not lhs_config then
-        rhs = decay_ref_to_ptr(rhs, rhs_config, true)
+        rhs = decay_ref_to_ptr(rhs, rhs_config)
         expr:replace_child(3, rhs)
     end
 end
@@ -453,7 +557,21 @@ function Visitor:rewrite_method_call_expr(expr)
         local offset_expr, caller = rewrite_chained_offsets(expr)
         local cfg = self:get_expr_cfg(caller)
 
-        if not cfg then return end
+        if not cfg or cfg:failed_rewrite() then return end
+
+        -- TODO: Refactor this into the below check?
+        if cfg:non_null_wrapped() then
+            local path_segment = caller:child(1)
+            local ident = path_segment and tostring(path_segment:get_ident())
+
+            if ident == "as_ptr#0" then return end
+
+            expr:to_method_call("unwrap", {caller})
+            expr:to_method_call("as_ptr", {expr})
+            expr:to_method_call("offset", {expr, offset_expr})
+
+            return
+        end
 
         -- Add an unwrap just so that the code is compilable even though
         -- we're probably dealing with an option of a raw ptr (ie maybe
@@ -477,7 +595,7 @@ function Visitor:rewrite_method_call_expr(expr)
             offset_expr:to_range(offset_expr, nil)
         end
 
-        if cfg:is_opt_any() then
+        if cfg:is_opt_any() and not cfg:non_null_wrapped() then
             caller:to_method_call("unwrap", {caller})
 
             if is_mut then
@@ -485,30 +603,39 @@ function Visitor:rewrite_method_call_expr(expr)
             end
         end
 
-        if not is_mut then
-            expr:to_index(caller, offset_expr)
-            expr:to_addr_of(expr, is_mut)
-        else
-            expr:to_field(caller, "1")
+        if not cfg:non_null_wrapped() then
+            if not is_mut then
+                expr:to_index(caller, offset_expr)
+                expr:to_addr_of(expr, is_mut)
+            else
+                expr:to_field(caller, "1")
+            end
         end
-    -- static_var.as_mut/ptr -> &[mut]static_var
+    -- var.as_mut/ptr -> &[mut]var
     elseif method_name == "as_ptr" or method_name == "as_mut_ptr" then
         local hirid = self.tctx:resolve_path_hirid(exprs[1])
-        local var = hirid and self:get_var(hirid)
+        local config = self:get_expr_cfg(exprs[1])
+        local arg_id = self.call_param_expr_to_arg_id[expr:get_id()]
+        local param_cfg = self.node_id_cfgs[arg_id]
 
-        if var and var.kind == "static" then
-            expr:to_addr_of(exprs[1], method_name == "as_mut_ptr")
+        -- There's a special case where we don't want to rewrite this way
+        -- when it needs to be decayed to a raw ptr. Here we check that either
+        -- we have a config for the param `param_cfg`, meaning it's expected to
+        -- not be raw, or if we don't have an `arg_id` then the special case
+        -- isn't applicable by viture of not being a call param
+        if config and config:is_array() and (param_cfg or not arg_id) then
+            expr:to_addr_of(exprs[1], config:is_mut())
         end
     -- p.is_null() -> p.is_none() or false when not using an option
     elseif method_name == "is_null" then
         local callee = expr:get_exprs()[1]
-        local conversion_cfg = self:get_expr_cfg(callee)
+        local config = self:get_expr_cfg(callee)
 
-        if not conversion_cfg then
+        if not config then
             return
         end
 
-        if conversion_cfg:is_opt_any() then
+        if config:is_opt_any() then
             expr:set_method_name("is_none")
         else
             expr:to_bool_lit(false)
@@ -530,26 +657,141 @@ function Visitor:rewrite_method_call_expr(expr)
 end
 
 -- Extracts a raw pointer from a rewritten rust type
-function decay_ref_to_ptr(expr, cfg, explicit_cast, for_struct_field)
+function decay_ref_to_ptr(expr, cfg, for_struct_field, ptr_ty)
+    local is_mut
+
+    -- If supplied with the ptr type, use its mutability
+    -- otherwise the cfg is an ok, but less ideal, fallback
+    if ptr_ty and not cfg:is_array() then
+        is_mut = tostring(ptr_ty:child(1):get_mutbl()) == "Mutable"
+    else
+        is_mut = cfg:is_mut()
+    end
+
+    -- There are a couple cases:
+    -- 1) Option<NonNull<T>> -> opt.map(|r| r.as_ptr()).unwrap_or(0 as *const/mut _)
+    -- 2) Option<Box<T>> -> opt.map(|r| &[mut] **r as *const/mut _).unwrap_or(0 as *const/mut _)
+    -- where T may be a slice or non slice. (For the slice case, .as_[mut_]ptr is used)
     if cfg:is_opt_any() then
-        if cfg:is_mut() then
-            -- The reasoning here is that for (boxed) slices you need as_mut to call
-            -- as_mut_ptr, but for non slices you can skip this since you can
-            -- get a reference directly to the data "&mut data" and decay that. This
-            -- might be possible with slices via 0-indexing but the intention
-            -- seems a little less clear than using the builtin "as_mut_ptr()"
-            if not (cfg:is_box_any() and not cfg:is_slice_any()) then
+        local closure_expr
+        local mutbl = is_mut and "Mutable" or "Immutable"
+        local as_ptr = is_mut and "as_mut_ptr" or "as_ptr"
+        local unwrap_or_expr = Expr.new{
+            "Cast",
+            Expr.new{
+                "Lit",
+                {
+                    "Lit",
+                    token={"TokenLit", kind="Integer", symbol="0", suffix=nil},
+                    kind={"Int", 0, "Unsuffixed"},
+                    span=DUMMY_SP,
+                }
+            },
+            Ty.new{"Ptr", {"MutTy", ty=Ty.new{"Infer"}, mutbl=mutbl}},
+        }
+
+        if cfg:is_slice_any() or cfg:non_null_wrapped() then
+            -- core::ptr::NonNull doesn't have an as_mut_ptr
+            if cfg:non_null_wrapped() then
+                as_ptr = "as_ptr"
+            end
+
+            closure_expr = Expr.new{
+                "MethodCall",
+                PathSegment.new(as_ptr),
+                {
+                    Expr.new{
+                        "Path",
+                        nil,
+                        Path.new{"r"},
+                    }
+                },
+            }
+
+            if not is_mut and cfg:non_null_wrapped() then
+                closure_expr = Expr.new{
+                    "Cast",
+                    closure_expr,
+                    Ty.new{"Ptr", {"MutTy", ty=Ty.new{"Infer"}, mutbl="Immutable"}},
+                }
+            end
+        else
+            closure_expr = Expr.new{
+                "Cast",
+                Expr.new{
+                    "AddrOf",
+                    mutbl,
+                    Expr.new{
+                        "Unary",
+                        "Deref",
+                        Expr.new{
+                            "Unary",
+                            "Deref",
+                            Expr.new{
+                                "Path",
+                                nil,
+                                Path.new{"r"},
+                            }
+                        }
+                    },
+                },
+                Ty.new{"Ptr", {"MutTy", ty=Ty.new{"Infer"}, mutbl=mutbl}},
+            }
+        end
+
+        local closure = Expr.new{
+            "Closure",
+            "Ref",
+            "NotAsync",
+            "Movable",
+            {
+                "FnDecl",
+                inputs={
+                    {
+                        "Param",
+                        attrs={},
+                        ty=Ty.new{"Infer"},
+                        pat=Pat.new{
+                            "Ident",
+                            {
+                                "ByValue",
+                                "Immutable",
+                            },
+                            Ident.new("r"),
+                            nil,
+                        },
+                        is_placeholder=false,
+                    },
+                },
+                output={"Default", DUMMY_SP},
+            },
+            closure_expr,
+            DUMMY_SP,
+        }
+
+        if not cfg.extra_data.non_null_wrapped then
+            if cfg:is_mut() then
                 expr:to_method_call("as_mut", {expr})
+            else
+                expr:to_method_call("as_ref", {expr})
             end
         end
 
-        expr:to_method_call("unwrap", {expr})
+        expr:to_method_call("map", {expr, closure})
+        expr:to_method_call(
+            "unwrap_or",
+            {
+                expr,
+                unwrap_or_expr,
+            }
+        )
+
+        return expr
     end
 
     if cfg:is_box_any() and not cfg:is_slice_any() then
-        -- TODO: Might need to downcast mutable ref to immutable one?
         expr:to_unary("Deref", expr)
-        expr:to_addr_of(expr, cfg:is_mut())
+        expr:to_addr_of(expr, is_mut)
     elseif cfg:is_slice_any() then
         if cfg:is_mut() then
             expr:to_method_call("as_mut_ptr", {expr})
@@ -562,28 +804,6 @@ function decay_ref_to_ptr(expr, cfg, explicit_cast, for_struct_field)
         expr:to_unary("Deref", expr)
     elseif cfg.extra_data.non_null_wrapped then
         expr:to_method_call("as_ptr", {expr})
-    end
-
-    if explicit_cast then
-        local mutbl
-
-        if cfg:is_mut() then
-            mutbl = "Mutable"
-        else
-            mutbl = "Immutable"
-        end
-
-        local inferred_ty = Ty.new{"Infer"}
-        local inferred_ptr_ty = Ty.new{
-            "Ptr",
-            {
-                "MutTy",
-                ty=inferred_ty,
-                mutbl={mutbl},
-            },
-        }
-
-        expr:to_cast(expr, inferred_ptr_ty)
     end
 
     return expr
@@ -599,11 +819,20 @@ function Visitor:rewrite_field_expr(expr)
             local cfg = self:get_expr_cfg(derefed_expr)
 
             -- This is a path we're expecting to modify
-            if not cfg then return end
+            if not cfg or cfg:failed_rewrite() then return end
 
             -- (*foo).bar -> (foo.as_mut().unwrap()).bar
             if cfg:is_opt_any() then
-                derefed_expr = decay_ref_to_ptr(derefed_expr, cfg, false, true)
+                if cfg:is_mut() then
+                    derefed_expr:to_method_call("as_mut", {derefed_expr})
+                end
+
+                derefed_expr:to_method_call("unwrap", {derefed_expr})
+
+                if cfg:non_null_wrapped() then
+                    derefed_expr:to_method_call("as_ptr", {derefed_expr})
+                    derefed_expr:to_unary("Deref", derefed_expr)
+                end
             end
 
             -- (*foo).bar -> (foo).bar (can't remove parens..)
@@ -666,11 +895,19 @@ function Visitor:rewrite_deref_expr(expr)
             -- *ptr[1] -> *ptr.as_mut().unwrap()[1] otherwise we can just unwrap
             -- *ptr[1] -> *ptr.unwrap()[1]
             if cfg:is_opt_any() then
-                if cfg:is_opt_box_any() or cfg.extra_data.mutability == "mut" then
+                if cfg:is_opt_box_any() or cfg:is_mut() then
                     unwrapped_expr:to_method_call("as_mut", {unwrapped_expr})
                 end
                 unwrapped_expr:to_method_call("unwrap", {unwrapped_expr})
             end
+            -- Here we just need to insert "as_ptr" on the NonNull variable, and let it proceed as it was
+        elseif cfg:non_null_wrapped() then
+            unwrapped_expr:to_method_call("unwrap", {unwrapped_expr})
+            unwrapped_expr:to_method_call("as_ptr", {unwrapped_expr})
+            unwrapped_expr:to_method_call("offset", {unwrapped_expr, offset_expr})
+            expr:to_unary("Deref", unwrapped_expr)
+
+            return
         else
             log_error("Found offset method applied to a reference: " .. tostring(expr))
             return
@@ -694,7 +931,7 @@ function Visitor:rewrite_deref_expr(expr)
     elseif unwrapped_expr:kind_name() == "Path" then
         local cfg = self:get_expr_cfg(unwrapped_expr)
 
-        if not cfg then return end
+        if not cfg or cfg:failed_rewrite() then return end
 
         -- If we're using an option, we must unwrap
         -- Must get inner reference to mutate
@@ -716,7 +953,7 @@ function Visitor:rewrite_deref_expr(expr)
                 expr:to_index(expr, zero_expr)
             else
                 -- *ptr.as_ptr() = 1; where ptr is std::ptr::NonNull
-                if cfg.extra_data.non_null_wrapped then
+                if cfg:non_null_wrapped() then
                     expr:to_method_call("as_ptr", {expr})
                 end
 
@@ -757,8 +994,12 @@ function Visitor:rewrite_assign_expr(expr)
             local path_expr = call_exprs[1]
             local param_expr = call_exprs[2]
             local path = path_expr:get_path()
-            local segment_idents = tablex.map(function(x) return x:get_ident():get_name() end, path:get_segments())
+            local segment_idents = {}
             local conversion_cfg = var and self.node_id_cfgs[var.id]
+
+            if path then
+                segment_idents = tablex.map(function(x) return x:get_ident():get_name() end, path:get_segments())
+            end
 
             -- In case malloc is called from another module check the last segment
             if conversion_cfg and segment_idents[#segment_idents] == "malloc" then
@@ -829,8 +1070,8 @@ function Visitor:rewrite_assign_expr(expr)
             end
         end
 
-        if lhs_cfg then
-            lhs_cfg.extra_data.non_null_wrapped = rhs_cfg.extra_data.non_null_wrapped
+        if lhs_cfg and not lhs_cfg:non_null_wrapped() then
+            lhs_cfg.extra_data.non_null_wrapped = rhs_cfg:non_null_wrapped()
         end
     else
         local lhs_cfg = self:get_expr_cfg(lhs)
@@ -841,9 +1082,18 @@ function Visitor:rewrite_assign_expr(expr)
             if rhs_kind == "Call" then
                 local path_expr = rhs:get_exprs()[1]
                 local path = path_expr:get_path()
+                local rhs_ty = self.tctx:get_expr_ty(rhs)
+                local mut_ty = rhs_ty:child(1)
 
                 path:set_segments{"", "core", "ptr", "NonNull", "new"}
                 path_expr:to_path(path)
+
+                -- NonNull takes a mut ptr, so we have to const -> mut cast..
+                -- Not sure if there's a better way to handle this
+                if tostring(mut_ty:get_mutbl()) == "Immutable" then
+                    mut_ty:set_mutbl("Mutable")
+                    rhs:to_cast(rhs, Ty.new{"Ptr", mut_ty})
+                end
 
                 rhs:to_call{path_expr, rhs}
                 expr:set_exprs{lhs, rhs}
@@ -853,8 +1103,16 @@ function Visitor:rewrite_assign_expr(expr)
                 return
             end
 
-            local some_path_expr = self.tctx:ident_path_expr("Some")
-            rhs:to_call{some_path_expr, rhs}
+            if lhs_cfg:non_null_wrapped() and rhs_kind ~= "Path" then
+                local path = Path.new{"", "core", "ptr", "NonNull", "new"}
+                local path_expr = Expr.new{"Path", nil, path}
+
+                rhs = Expr.new{"Call", path_expr, {rhs}}
+            else
+                local some_path_expr = Expr.new{"Path", nil, Path.new{"Some"}}
+                rhs:to_call{some_path_expr, rhs}
+            end
+
             expr:set_exprs{lhs, rhs}
         end
     end
@@ -868,6 +1126,19 @@ function Visitor:rewrite_call_expr(expr)
     local segment_idents = path and tablex.map(function(x) return x:get_ident():get_name() end, path:get_segments())
 
     if not segment_idents then return end
+
+    -- Bookkeeping of call param exprs to arg_id
+    local fn
+
+    for i, param_expr in ipairs(expr:get_exprs()) do
+        if i == 1 then
+            local hirid = self.tctx:resolve_path_hirid(param_expr)
+
+            fn = self:get_fn(hirid)
+        elseif fn then
+            self.call_param_expr_to_arg_id[param_expr:get_id()] = fn.arg_ids[i - 1]
+        end
+    end
 
     -- free(foo.bar as *mut libc::c_void) -> foo.bar.take()
     -- In case free is called from another module check the last segment
@@ -964,19 +1235,31 @@ function Visitor:rewrite_call_expr(expr)
                             param_expr:to_call{some_path_expr, param_expr}
                             goto continue
                         -- Decay mut ref to immut ref inside option
-                        -- foo(x) -> foo(x.as_ref().map(|r| &**r))
-                        elseif path_cfg:is_box_any() and not param_cfg:is_box_any() then
+                        elseif path_cfg:is_box_any() and not param_cfg:is_box_any() and
+                            not path_cfg:is_opt_any() and not param_cfg:is_opt_any() then
+
                             param_expr = decay_ref_to_ptr(param_expr, param_cfg)
                             goto continue
-                        elseif path_cfg:is_mut() and not param_cfg:is_mut() then
+                        -- foo(x) -> foo(x.as_ref().map(|r| &**r)) iff both path and param
+                        -- aren't boxes (REVIEW: maybe should check that they're opt too?)
+                        elseif not (path_cfg:is_box_any() and param_cfg:is_box_any()) then
                             local var_expr = self.tctx:ident_path_expr("r")
 
                             var_expr:to_unary("Deref", var_expr)
                             var_expr:to_unary("Deref", var_expr)
-                            var_expr:to_addr_of(var_expr, false)
-
+                            var_expr:to_addr_of(var_expr, param_cfg:is_mut())
                             var_expr:to_closure({"r"}, var_expr)
-                            param_expr:to_method_call("as_ref", {param_expr})
+
+                            if path_cfg:is_mut() then
+                                if not param_cfg:is_mut() then
+                                    param_expr:to_method_call("as_ref", {param_expr})
+                                else
+                                    param_expr:to_method_call("as_mut", {param_expr})
+                                end
+                            else
+                                param_expr:to_method_call("as_ref", {param_expr})
+                            end
+
                             param_expr:to_method_call("map", {param_expr, var_expr})
                             goto continue
                         end
@@ -1007,9 +1290,11 @@ function Visitor:rewrite_call_expr(expr)
 
                     -- If we have a config for this path expr, we assume it has been rewritten
                     -- and if we don't have a config for the param itself, we assume it has not
-                    -- been rewritten, meaning we must decay it
+                    -- been rewritten, meaning we must decay it. Foreign functions are a common
+                    -- case for not having a param_cfg.
                     if not param_cfg then
-                        expr = decay_ref_to_ptr(expr, path_cfg)
+                        local ptr_ty = self.tctx:get_expr_ty(expr)
+                        expr = decay_ref_to_ptr(expr, path_cfg, false, ptr_ty)
                     end
 
                     return expr
@@ -1377,11 +1662,39 @@ function Visitor:visit_local(locl, walk)
     elseif is_null_ptr(init) then
         locl:set_ty(nil)
         locl:set_init(nil)
+    -- Here we need an explicit type to coerce array ref to slice ref
+    elseif init:get_method_name() == "as_mut_ptr" or init:get_method_name() == "as_ptr" then
+        local caller = init:child(2)[1]
+        local cfg = self:get_expr_cfg(caller)
+
+        if cfg then
+            local mut_ty = locl:get_ty():child(1)
+            local slice = Ty.new{"Slice", mut_ty:get_ty()}
+            local mutbl = "Immutable"
+
+            if cfg:is_mut() then
+                mutbl = "Mutable"
+            end
+
+            local slice_ref = Ty.new{"Rptr", nil, {"MutTy", ty=slice, mutbl=mutbl}}
+
+            locl:set_ty(slice_ref)
+        end
     end
 
     if cfg.extra_data.clear_init_and_ty then
         locl:set_ty(nil)
         locl:set_init(nil)
+    end
+
+    local ty = locl:get_ty()
+
+    -- If we're not looking at a pointer (ie an array) and we haven't removed
+    -- the explicit type, then we likely failed to rewrite the local (ie a pointer
+    -- cast)
+    if ty ~= nil and ty:kind_name() == "Ptr" then
+        cfg.extra_data.failed_rewrite = true
+        log_error("Failed to rewrite local: " .. tostring(locl))
     end
 
     local pat_hirid = self.tctx:nodeid_to_hirid(locl:get_pat_id())
@@ -1400,7 +1713,8 @@ end
 ConfigBuilder = {}
 
 function ConfigBuilder.new(marks, boxes, tctx)
-    self = {}
+    local self = {}
+
     self.marks = marks
     self.node_id_cfgs = {}
     self.boxes = boxes
@@ -1411,35 +1725,6 @@ function ConfigBuilder.new(marks, boxes, tctx)
     ConfigBuilder.__index = ConfigBuilder
 
     return self
-end
-
-function ConfigBuilder:flat_map_param(param)
-    local param_id = param:get_id()
-    local param_ty = param:get_ty()
-    local param_ty_id = param_ty:get_id()
-    local marks = self.marks[param_ty_id] or {}
-
-    -- Skip over params likely from extern fns
-    if param:get_pat():kind_name() == "Wild" then
-        return {param}
-    end
-
-    -- Skip over pointers to void
-    if is_void_ptr(param_ty) then
-        return {param}
-    end
-
-    -- Skip if there are no marks
-    if is_empty(marks) then
-        return {param}
-    end
-
-    local attrs = param:get_attrs()
-
-    self.pat_to_var_id[param:get_pat():get_id()] = param_id
-    self.node_id_cfgs[param_id] = ConvConfig.from_marks_and_attrs(marks, attrs)
-
-    return {param}
 end
 
 function ConfigBuilder:visit_local(locl, walk)
@@ -1500,6 +1785,41 @@ function ConfigBuilder:flat_map_item(item, walk)
             if not is_empty(marks) then
                 self.node_id_cfgs[field_id] = ConvConfig.from_marks_and_attrs(marks, field:get_attrs())
             end
+        end
+    -- We don't visit params directly because then we could be looking at foreign params unknowingly
+    -- which we don't want
+    elseif item_kind == "Fn" then
+        local decl = item:child(1)
+        local params = decl:get_inputs()
+
+        for _, param in ipairs(params) do
+            local param_id = param:get_id()
+            local param_ty = param:get_ty()
+            local param_ty_id = param_ty:get_id()
+            local marks = self.marks[param_ty_id] or {}
+
+            -- Skip over pointers to void
+            if is_void_ptr(param_ty) then
+                goto continue
+            end
+
+            -- Skip if there are no marks
+            if is_empty(marks) then
+                goto continue
+            end
+
+            local attrs = param:get_attrs()
+
+            self.pat_to_var_id[param:get_pat():get_id()] = param_id
+            self.node_id_cfgs[param_id] = ConvConfig.from_marks_and_attrs(marks, attrs)
+
+            ::continue::
+        end
+    elseif item_kind == "Static" then
+        local ty = item:get_kind():child(1)
+
+        if ty:kind_name() == "Array" then
+            self.node_id_cfgs[item:get_id()] = ConvConfig.new{"array"}
         end
     end
 
@@ -1593,7 +1913,8 @@ end
 MallocMarker = {}
 
 function MallocMarker.new(tctx)
-    self = {}
+    local self = {}
+
     self.tctx = tctx
     self.boxes = {}
 
@@ -1622,7 +1943,11 @@ function MallocMarker:visit_expr(expr, walk)
                 local call_exprs = cast_expr:get_exprs()
                 local path_expr = call_exprs[1]
                 local path = path_expr:get_path()
-                local segment_idents = tablex.map(function(x) return x:get_ident():get_name() end, path:get_segments())
+                local segment_idents = {}
+
+                if path then
+                    segment_idents = tablex.map(function(x) return x:get_ident():get_name() end, path:get_segments())
+                end
 
                 -- In case malloc is called from another module check the last segment
                 if segment_idents[#segment_idents] == "malloc" or segment_idents[#segment_idents] == "calloc" then
