@@ -1411,6 +1411,70 @@ fn can_coerce<'a, 'tcx>(
     }
 }
 
+struct SliceMarker;
+
+impl Transform for SliceMarker {
+    fn transform(&self, krate: &mut Crate, st: &CommandState, cx: &RefactorCtxt) {
+        // let mut slice_set = HashSet::new();
+        let pat = parse_expr(cx.session(), "__x.offset(__y)");
+        let repl = parse_expr(cx.session(), "__s __x.offset(__y)");
+
+        // TODO : The challenge now is taking things I match and finding their 
+        // definition or area where they are brought in.
+
+        mut_visit_match(st, cx, pat, krate, |orig, mut mcx| {
+            let x = mcx.bindings.get::<_, P<Expr>>("__x").unwrap().clone();
+            // let something = x.id;
+            // let name = cx.hir_map().
+
+            let hir_node = cx.hir_map().find(x.id);
+            
+            // println!("def_id: {:?}", hir_id.owner_def_id());
+            // if let Some(def_id) = self.hir_map().opt_local_def_id(hir_id) {
+            //     return Some(self.def_type(def_id));
+            // }
+
+            // cx.ty_ctxt().def_path_str(x.id)
+            println!("Matched x: {:?}, path: {:?}, ", x, hir_node);
+            st.add_mark(x.id, "[slice]".into_symbol());
+            // mcx.bindings.add("__s", Ident::with_dummy_span("[slice]".into_symbol()));
+            // *orig = repl.clone().subst(st, cx, &mcx.bindings);
+
+            // match cx.node_type(x.id).kind {
+            //     ty::TyKind::RawPtr(ty_and_mut) => {
+            //         println!("TypeKind: {:?}", ty_and_mut.ty.kind);
+            //     },
+            //     _ => println!("Is Not Raw Pointer"),
+            // }
+
+            // slice_set.insert(x.to_string());
+
+            // let super_test = parse_expr(cx.session(), "__q");
+            // let def_path = cx.def_path(hir_id.owner_def_id());
+            // mcx.bindings.add("__q", def_path);
+            // *orig = super_test.clone().subst(st, cx, &mcx.bindings);
+            // let struct_def_id = match cx.node_type(x.id).kind {
+            //     ty::TyKind::Adt(ref def, _) => def.did,
+            //     _ => return,
+            // };
+            // let struct_path = cx.def_path(struct_def_id);
+
+            // mcx.bindings.add("__s", struct_path);
+            // *orig = repl.clone().subst(st, cx, &mcx.bindings);
+        });
+
+        println!("{:?}", st.marks());
+
+        // println!("Slice Set: {:?}", slice_set);
+
+        // println!("parsed_expression: {:?}", expr);
+    }
+
+    fn min_phase(&self) -> Phase {
+        Phase::Phase3
+    }
+}
+
 pub fn register_commands(reg: &mut Registry) {
     use super::mk;
 
@@ -1442,4 +1506,6 @@ pub fn register_commands(reg: &mut Registry) {
     reg.register("type_fix_rules", |args| Box::new(TypeFixRules { rules: args.to_owned() }));
 
     reg.register("autoretype", |args| Box::new(AutoRetype::new(args)));
+
+    reg.register("mark_slices", |args| mk(SliceMarker {}));
 }
