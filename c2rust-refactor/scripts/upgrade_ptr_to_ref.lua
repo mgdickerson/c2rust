@@ -111,9 +111,8 @@ function ConvConfig.from_marks_and_attrs(marks, attrs)
     local box = marks["box"]
     local noalias = marks["noalias"]
 
-    if not noalias then
-        -- print("I have reached here.")
-        return
+    if marks["slice"] then
+        slice = true
     end
 
     for _, attr in ipairs(attrs) do
@@ -123,7 +122,14 @@ function ConvConfig.from_marks_and_attrs(marks, attrs)
             opt = false
         elseif attr_ident == "slice" then
             slice = true
+        elseif attr_ident == "noalias" then
+            noalias = true
         end
+    end
+
+    if not noalias then
+        -- print("I have reached here.")
+        return
     end
 
     -- TODO: And technically move is mutually exclusive too
@@ -1980,6 +1986,7 @@ function run_ptr_upgrades(node_id_cfgs)
         -- refactor:run_command("ownership_annotate", {"target"})
         refactor:run_command("ownership_mark_pointers", {})
         refactor:run_command("ownership_pointer_analysis", {sc_args[1]})
+        refactor:run_command("mark_slices", {})
         -- refactor:dump_marks()
     end
 

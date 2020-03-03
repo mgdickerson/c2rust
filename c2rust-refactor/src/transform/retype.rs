@@ -1,8 +1,11 @@
 use std::collections::{HashMap, HashSet};
 use std::ops::DerefMut;
+use std::ops::Deref;
 use rustc::hir;
 use rustc::hir::def_id::DefId;
 use rustc::ty::{self, TyKind, TyCtxt, ParamEnv};
+use rustc::hir::Node;
+use rustc::hir::def::Res;
 use syntax::ast::*;
 use syntax::mut_visit::{self, MutVisitor};
 use syntax::parse::PResult;
@@ -15,7 +18,7 @@ use smallvec::SmallVec;
 
 use c2rust_ast_builder::{mk, IntoSymbol};
 use crate::ast_manip::{FlatMapNodes, MutVisit, MutVisitNodes, fold_output_exprs};
-use crate::ast_manip::fn_edit::{mut_visit_fns, visit_fns};
+use crate::ast_manip::fn_edit::{mut_visit_fns, visit_fns, FnKind};
 use crate::ast_manip::lr_expr::{self, fold_expr_with_context, fold_exprs_with_context};
 use crate::command::{Command, CommandState, RefactorState, Registry, TypeckLoopResult};
 use crate::driver::{self, Phase, parse_ty, parse_expr};
@@ -1411,67 +1414,126 @@ fn can_coerce<'a, 'tcx>(
     }
 }
 
-struct SliceMarker;
+struct SliceMarker {
+    pub safety: Vec<String>,
+}
 
 impl Transform for SliceMarker {
     fn transform(&self, krate: &mut Crate, st: &CommandState, cx: &RefactorCtxt) {
-        // let mut slice_set = HashSet::new();
+        let strict = match self.safety.get(0) {
+            Some(safety) => !safety.contains("unsafe"),
+            None => true
+        };
+
         let pat = parse_expr(cx.session(), "__x.offset(__y)");
-        let repl = parse_expr(cx.session(), "__s __x.offset(__y)");
+        let mut slice_set = HashSet::new();
 
-        // TODO : The challenge now is taking things I match and finding their 
-        // definition or area where they are brought in.
+        mut_visit_match(st, cx, pat, krate, |_expr, mcx| {
+            let x = mcx.bindings.get::<_, P<Expr>>("__x").unwrap();
+            let y = mcx.bindings.get::<_, P<Expr>>("__y").unwrap();
 
-        mut_visit_match(st, cx, pat, krate, |orig, mut mcx| {
-            let x = mcx.bindings.get::<_, P<Expr>>("__x").unwrap().clone();
-            // let something = x.id;
-            // let name = cx.hir_map().
-
-            let hir_node = cx.hir_map().find(x.id);
+            // Unless otherwise marked unsafe, always check that internal arguements are unsigned
+            if strict {
+                if !arg_ty_valid(y) {
+                    return;
+                }
+            }
             
-            // println!("def_id: {:?}", hir_id.owner_def_id());
-            // if let Some(def_id) = self.hir_map().opt_local_def_id(hir_id) {
-            //     return Some(self.def_type(def_id));
-            // }
+            
+            
+            match &x.kind {
+                ExprKind::Path(_, path) => {
+                    if !path.segments.is_empty() {
+                        let nid = path.segments[0].id;
 
-            // cx.ty_ctxt().def_path_str(x.id)
-            println!("Matched x: {:?}, path: {:?}, ", x, hir_node);
-            st.add_mark(x.id, "[slice]".into_symbol());
-            // mcx.bindings.add("__s", Ident::with_dummy_span("[slice]".into_symbol()));
-            // *orig = repl.clone().subst(st, cx, &mcx.bindings);
-
-            // match cx.node_type(x.id).kind {
-            //     ty::TyKind::RawPtr(ty_and_mut) => {
-            //         println!("TypeKind: {:?}", ty_and_mut.ty.kind);
-            //     },
-            //     _ => println!("Is Not Raw Pointer"),
-            // }
-
-            // slice_set.insert(x.to_string());
-
-            // let super_test = parse_expr(cx.session(), "__q");
-            // let def_path = cx.def_path(hir_id.owner_def_id());
-            // mcx.bindings.add("__q", def_path);
-            // *orig = super_test.clone().subst(st, cx, &mcx.bindings);
-            // let struct_def_id = match cx.node_type(x.id).kind {
-            //     ty::TyKind::Adt(ref def, _) => def.did,
-            //     _ => return,
-            // };
-            // let struct_path = cx.def_path(struct_def_id);
-
-            // mcx.bindings.add("__s", struct_path);
-            // *orig = repl.clone().subst(st, cx, &mcx.bindings);
+                        let hir_id = cx.hir_map().node_to_hir_id(nid);
+                        if let Node::PathSegment(ps) = cx.hir_map().get(hir_id) {
+                            if let Some(res) = ps.res {
+                                if let Res::Local(id) = res {
+                                    let node_id = cx.hir_map().hir_to_node_id(id);
+                                    slice_set.insert(node_id);
+                                }
+                            }
+                        }
+                    }
+                },
+                _ => {},
+            }
         });
 
-        println!("{:?}", st.marks());
+        mut_visit_fns(krate, |fl| {
+            if fl.kind == FnKind::Foreign {
+                return;
+            }
+            // There are two cases we will be looking for. Fn arguments and let statements.
 
-        // println!("Slice Set: {:?}", slice_set);
+            // Case 1: fn args
+            for arg in fl.decl.inputs.iter_mut() {
+                let hir_id = cx.hir_map().node_to_hir_id(arg.id);
+                if let Node::Param(param) = cx.hir_map().get(hir_id) {
+                    if slice_set.contains(&cx.hir_map().hir_to_node_id(param.pat.deref().hir_id)) {
+                        st.add_mark(arg.ty.id, "slice".into_symbol());
+                    }
+                }
+            }
 
-        // println!("parsed_expression: {:?}", expr);
+            // Case 2: fn locals
+            FlatMapNodes::visit(&mut fl.block, |s: Stmt| {
+                // Check through function stmts to see if a local has been identified as potential slice
+                match &s.kind {
+                    StmtKind::Local(ast_local) => {
+                        if slice_set.contains(&ast_local.pat.id) {
+                            if let Some(ty) = ast_local.ty.as_ref() {
+                                st.add_mark(ty.id, "slice".into_symbol())
+                            }
+                        }
+                    },
+                    _ => { /* Only pattern currently checked is ast_locals */},
+                };
+
+                smallvec!(s)
+            });
+        });
     }
 
     fn min_phase(&self) -> Phase {
         Phase::Phase3
+    }
+}
+
+// Very simple check that the base type is unsigned. Currently works on literal offsets.
+fn arg_ty_valid(arg: &P<Expr>) -> bool {
+    match &arg.kind {
+        ExprKind::Box(expr) => {
+            return arg_ty_valid(&expr)
+        },
+        ExprKind::Array(vec_expr) => {
+            // Get type of elements
+            if let Some(expr) = vec_expr.get(0) {
+                return arg_ty_valid(expr)
+            } else {
+                return false
+            }
+        },
+        ExprKind::Unary(op, expr) => {
+            match &op {
+                UnOp::Deref => return arg_ty_valid(&expr),
+                _ => return false
+            }
+        },
+        ExprKind::Lit(lit) => {
+            if let LitKind::Int(_uint, ty) = lit.kind {
+                if let LitIntType::Signed(_signed) = ty {
+                    return false
+                }
+            }
+            return true
+        },
+        ExprKind::Cast(expr, _cast_ty) => {
+            // Checking for base type. It is possible that after removing casts, the base type works.
+            return arg_ty_valid(&expr)
+        },
+        _ => return false,
     }
 }
 
@@ -1507,5 +1569,7 @@ pub fn register_commands(reg: &mut Registry) {
 
     reg.register("autoretype", |args| Box::new(AutoRetype::new(args)));
 
-    reg.register("mark_slices", |args| mk(SliceMarker {}));
+    reg.register("mark_slices", |args| mk(SliceMarker {
+        safety: args.to_owned()
+    }));
 }

@@ -711,8 +711,6 @@ impl Transform for PointerAnalysis {
         // SVF Results Map
         let result = AnalysisResults::pull_results(self.path.clone());
 
-        // TODO : Test arguement passing to lua.
-
         // Used for fns already visited on the module level iteration (properly attributed a module name there)
         let mut visited_fns = HashSet::new();
         let parent_module = pull_parent_module(&cx.session().local_crate_source_file);
@@ -724,14 +722,7 @@ impl Transform for PointerAnalysis {
                     // Found module of name i.ident
                     for si in &m.items {
                         match &si.kind {
-                            ItemKind::Mod(_sub_m) => {
-                                // TODO :
-                                // For single module level, this is not a case that will be reached,
-                                // later I will need to flatten this with continually constructed module naming.
-                                
-                                // Found sub-sub-modules
-                                // println!("Found sub module: {:?}", si.ident);
-                            },
+                            ItemKind::Mod(_sub_m) => {},
                             ItemKind::Fn(decl, ..) => {
                                 if !visited_fns.contains(&si.ident) {
                                     // println!("Found sub fn: {}:{}", i.ident, si.ident);pip
@@ -754,17 +745,6 @@ impl Transform for PointerAnalysis {
                         }
                     }
                 },
-                // TODO : Check if I can safely assume all Module functions will be visited before parent_module Functions.
-                // ItemKind::Fn(decl, ..) => {
-                //     if !visited_fns.contains(&i.ident) {
-                //         // Found fn from 'parent_module'
-
-                //         // if i.ident.to_string() == "foo" {
-                //         //     println!("No need to trim.");
-                //         // }
-                //         println!("Item of fn_type: {}:{}", parent_module.clone().unwrap(), i.ident);
-                //     }
-                // },
                 _ => { /* items of other type */ },
             }
         });
